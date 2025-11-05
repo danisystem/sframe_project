@@ -1,0 +1,65 @@
+[package]
+name = "sframe_test"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+sframe-ring = ["sframe/ring"]
+sframe-openssl = ["sframe/openssl"]
+sframe-rust-crypto = ["sframe/rust-crypto"]
+default = ["sframe-rust-crypto"]   # <— usiamo rust-crypto come default
+
+[dependencies]
+cpal = "0.15"                 # capture/playback audio
+crossbeam-channel = "0.5"     # canali tra thread (capture -> crypto/send)
+anyhow = "1"
+log = "0.4"
+simple_logger = "5"         # logger semplice per Windows
+clap = { version = "4", features = ["derive"] }
+
+sframe = { git = "https://github.com/TobTheRock/sframe-rs.git", branch = "main", default-features = false }
+hex = "0.4.3"
+ctrlc = "3"
+
+# --- aggiungi/lascia queste dipendenze (oltre alle tue già presenti) ---
+image = { version = "0.24", default-features = false, features = ["jpeg", "png"] }
+minifb = "0.25"
+nokhwa = { version = "0.10.9", features = ["input-msmf"] }
+
+bytemuck = "1.14"
+winit = "0.28"
+softbuffer = "0.3"
+
+
+
+[[bin]]
+name = "tx_audio"
+path = "src/tx_audio.rs"
+
+[[bin]]
+name = "rx_audio"
+path = "src/rx_audio.rs"
+
+[[bin]]
+name = "tx_video"
+path = "src/tx_video.rs"
+
+[[bin]]
+name = "rx_video"
+path = "src/rx_video.rs"
+
+[[bin]]
+name = "rx_video_http"
+path = "src/rx_video_http.rs"
+
+[[bin]]
+name = "tx_av"
+path = "src/tx_av.rs"
+
+[[bin]]
+name = "rx_av"
+path = "src/rx_av.rs"
+
+
+[dev-dependencies]
+pretty_assertions = "1"      # usata solo nei test di sender/receiver
