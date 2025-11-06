@@ -61,6 +61,10 @@ path = "src/tx_av.rs"
 name = "rx_av"
 path = "src/rx_av.rs"
 
+[[bin]]
+name = "av_peer"
+path = "src/av_peer.rs"
+
 
 [dev-dependencies]
 pretty_assertions = "1"      # usata solo nei test di sender/receiver

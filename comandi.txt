@@ -40,8 +40,7 @@ target\release\tx_video.exe 127.0.0.1:6000 `
 
 target\release\rx_av.exe 0.0.0.0:7000 --key-audio 1 --key-video 2 --secret SUPER_SECRET --suite aes-gcm256-sha512 --inspect
 
-
-PS C:\Users\dani3\sframe_project\sframe_test> target\release\tx_av.exe 127.0.0.1:7000 --device 0 --width 640 --height 480 --fps 30 --quality 70 --key-audio 1 --key-video 2 --secret SUPER_SECRET --suite aes-gcm256-sha512 --inspect
+target\release\tx_av.exe 127.0.0.1:7000 --device 0 --width 640 --height 480 --fps 30 --quality 70 --key-audio 1 --key-video 2 --secret SUPER_SECRET --suite aes-gcm256-sha512 --inspect
 
 
 
