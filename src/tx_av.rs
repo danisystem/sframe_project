@@ -10,18 +10,21 @@ use std::{
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use image::codecs::jpeg::JpegEncoder;
 use image::{ColorType, ImageBuffer, Rgb};
+
 use nokhwa::pixel_format::RgbFormat;
 use nokhwa::utils::{
     ApiBackend, CameraFormat, CameraIndex, FrameFormat, RequestedFormat, RequestedFormatType,
 };
 use nokhwa::{query, Camera};
+
 use sframe::header::SframeHeader;
 use sframe::CipherSuite;
 
 mod sender;
 use sender::Sender;
 
-// ---------- CLI helpers ----------
+/* ───────────── CLI helpers ───────────── */
+
 fn has_flag(args: &[String], f: &str) -> bool {
     args.iter().any(|a| a == f)
 }
@@ -47,7 +50,8 @@ fn parse_suite(s: &str) -> Option<CipherSuite> {
     }
 }
 
-// ---------- framing ----------
+/* ───────────── framing ───────────── */
+
 const SID_VIDEO: u8 = 0x01;
 const SID_AUDIO: u8 = 0x02;
 
@@ -59,7 +63,8 @@ fn send_frame(stream: &Arc<Mutex<TcpStream>>, sid: u8, pkt: &[u8]) -> std::io::R
     Ok(())
 }
 
-// ---------- inspect ----------
+/* ───────────── inspect ───────────── */
+
 fn inspect_packet_compact(prefix: &str, packet: &[u8]) {
     if let Ok(h) = SframeHeader::deserialize(packet) {
         let hdr = h.len();
@@ -77,7 +82,22 @@ fn inspect_packet_compact(prefix: &str, packet: &[u8]) {
     }
 }
 
-// ---------- video helpers ----------
+/* ───────────── OS/backend helpers ───────────── */
+
+#[inline]
+fn default_backend() -> ApiBackend {
+    #[cfg(target_os = "macos")]
+    {
+        ApiBackend::AVFoundation
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        ApiBackend::Auto
+    }
+}
+
+/* ───────────── video helpers ───────────── */
+
 fn pick_best_format(
     formats: &[CameraFormat],
     want_w: u32,
@@ -94,6 +114,7 @@ fn pick_best_format(
         };
         (pref, w.abs_diff(want_w), h.abs_diff(want_h), fps.abs_diff(want_fps))
     }
+
     let mut best: Option<(CameraFormat, (u32, u32, u32, u32))> = None;
     for f in formats {
         let s = score(f, want_w, want_h, want_fps);
@@ -110,18 +131,9 @@ fn pick_best_format(
     best.map(|(bf, _)| bf)
 }
 
-fn main() -> Result<()> {
-    // USO:
-    // tx_av <HOST:PORT>
-    //       [--device N] [--width W] [--height H] [--fps F] [--quality Q]
-    //       [--key-audio KA] [--key-video KV] [--secret S] [--suite SUITE]
-    //       [--inspect] [--list]
-    //
-    // Esempi:
-    //   tx_av 127.0.0.1:7000 --list
-    //   tx_av 127.0.0.1:7000 --device 0 --width 640 --height 480 --fps 30 --quality 70
-    //                        --key-audio 1 --key-video 2 --secret SUPER_SECRET --suite aes-gcm256-sha512 --inspect
+/* ───────────── main ───────────── */
 
+fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 || has_flag(&args, "--help") {
         eprintln!("Uso: tx_av <HOST:PORT> [--device N] [--width W] [--height H] [--fps F] [--quality Q] [--key-audio KA] [--key-video KV] [--secret S] [--suite SUITE] [--inspect] [--list]");
@@ -143,91 +155,142 @@ fn main() -> Result<()> {
         .unwrap_or(CipherSuite::AesGcm256Sha512);
     let inspect = has_flag(&args, "--inspect");
 
-    // Elenco device/formati video
+    let backend = default_backend();
+
+    /* ─────────── LIST ─────────── */
     if list {
-        let cams = query(ApiBackend::Auto)?;
+        let cams = query(backend)?;
         println!("Found {} camera(s):", cams.len());
         for (i, info) in cams.iter().enumerate() {
             println!("[{}] {}", i, info.human_name());
             let req = RequestedFormat::new::<RgbFormat>(RequestedFormatType::None);
-            if let Ok(mut cam) = Camera::new(CameraIndex::Index(i as u32), req) {
-                if let Ok(fmts) = cam.compatible_camera_formats() {
-                    for f in fmts {
-                        println!(
-                            "   - {:?} {}x{} @{}fps",
-                            f.format(),
-                            f.resolution().width(),
-                            f.resolution().height(),
-                            f.frame_rate()
-                        );
+            match Camera::new(CameraIndex::Index(i as u32), req) {
+                Ok(mut cam) => match cam.compatible_camera_formats() {
+                    Ok(fmts) => {
+                        for f in fmts {
+                            println!(
+                                "   - {:?} {}x{} @{}fps",
+                                f.format(),
+                                f.resolution().width(),
+                                f.resolution().height(),
+                                f.frame_rate()
+                            );
+                        }
                     }
-                }
+                    Err(e) => eprintln!("   (errore nel leggere i formati: {e})"),
+                },
+                Err(e) => eprintln!("   (errore nell’aprire la camera: {e})"),
             }
         }
         return Ok(());
     }
 
-    // SFrame sender per audio/video
+    /* ─────────── SFRAME ─────────── */
     let mut s_audio = Sender::with_cipher_suite(key_audio, suite);
     s_audio.set_encryption_key(secret.as_bytes())?;
     let mut s_video = Sender::with_cipher_suite(key_video, suite);
     s_video.set_encryption_key(secret.as_bytes())?;
 
-    // TCP
+    /* ─────────── TCP ─────────── */
     let stream = Arc::new(Mutex::new(TcpStream::connect(dst)?));
     stream.lock().unwrap().set_nodelay(true)?;
     println!("[tx_av] connected {}", dst);
 
-    // ----------------- VIDEO thread -----------------
+    /* ─────────── THREAD VIDEO ─────────── */
     {
         let stream = Arc::clone(&stream);
-        let mut s_video = s_video; // move
-        thread::spawn(move || {
-            // probe
-            let req_probe = RequestedFormat::new::<RgbFormat>(RequestedFormatType::None);
-            let mut cam =
-                Camera::new(CameraIndex::Index(device), req_probe).expect("open cam (probe)");
-            let fmts = cam.compatible_camera_formats().expect("fmts");
-            let best = pick_best_format(&fmts, want_w, want_h, want_fps).expect("pick format");
-            let use_w = best.resolution().width();
-            let use_h = best.resolution().height();
-            let use_fps = best.frame_rate();
-            eprintln!(
-                "[tx_av][video] richiesto ~{}x{}@{}; scelto {}x{}@{} {:?}",
-                want_w, want_h, want_fps, use_w, use_h, use_fps, best.format()
-            );
-            drop(cam);
-            let req_exact = RequestedFormat::new::<RgbFormat>(RequestedFormatType::Exact(best));
-            let mut cam =
-                Camera::new(CameraIndex::Index(device), req_exact).expect("open cam exact");
-            cam.open_stream().expect("open_stream");
+        let mut s_video = s_video;
 
-            let frame_dt = Duration::from_millis((1000 / use_fps.max(1)) as u64);
+        thread::spawn(move || {
+            let req_probe = RequestedFormat::new::<RgbFormat>(RequestedFormatType::None);
+            let mut cam = match Camera::new(CameraIndex::Index(device), req_probe) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("[tx_av][video] open cam (probe) err: {e}");
+                    return;
+                }
+            };
+
+            let fmts = cam.compatible_camera_formats().unwrap_or_default();
+            let best_opt = pick_best_format(&fmts, want_w, want_h, want_fps);
+
+            // FIX MOVE: ricrea CameraIndex ogni volta
+            let mk_index = || CameraIndex::Index(device);
+
+            let mut cam = if let Some(best) = best_opt.clone() {
+                eprintln!(
+                    "[tx_av][video] scelto {}x{}@{} {:?}",
+                    best.resolution().width(),
+                    best.resolution().height(),
+                    best.frame_rate(),
+                    best.format()
+                );
+
+                let req = RequestedFormat::new::<RgbFormat>(RequestedFormatType::Closest(best));
+                Camera::new(mk_index(), req).unwrap_or_else(|_| {
+                    let req_fb =
+                        RequestedFormat::new::<RgbFormat>(RequestedFormatType::None);
+                    Camera::new(mk_index(), req_fb).expect("fallback default camera")
+                })
+            } else {
+                let req = RequestedFormat::new::<RgbFormat>(RequestedFormatType::None);
+                Camera::new(mk_index(), req).expect("default camera")
+            };
+
+            if let Err(e) = cam.open_stream() {
+                eprintln!("[tx_av][video] open_stream err: {e}");
+                return;
+            }
+
+            let cf = cam.camera_format();
+            eprintln!(
+                "[tx_av][video] attivo {}x{} @{} {:?}",
+                cf.resolution().width(),
+                cf.resolution().height(),
+                cf.frame_rate(),
+                cf.format()
+            );
+
+            let use_fps = cf.frame_rate().max(1);
+            let frame_dt = Duration::from_millis((1000 / use_fps) as u64);
+
             let mut last = Instant::now();
             let mut n: usize = 0;
-            let mut jpeg_buf: Vec<u8> = Vec::with_capacity(256 * 1024);
+            let mut jpeg_buf = Vec::with_capacity(512 * 1024);
 
             loop {
                 let rgb = match cam.frame() {
-                    Ok(f) => f.decode_image::<RgbFormat>().expect("rgb"),
+                    Ok(f) => match f.decode_image::<RgbFormat>() {
+                        Ok(x) => x,
+                        Err(e) => {
+                            eprintln!("[tx_av][video] decode err: {e}");
+                            continue;
+                        }
+                    },
                     Err(e) => {
                         eprintln!("[tx_av][video] frame err: {e}");
                         continue;
                     }
                 };
-                let img: ImageBuffer<Rgb<u8>, _> = match ImageBuffer::from_raw(use_w, use_h, rgb) {
+
+                let cf = cam.camera_format();
+                let (w, h) = (cf.resolution().width(), cf.resolution().height());
+
+                let img: ImageBuffer<Rgb<u8>, _> = match ImageBuffer::from_raw(w, h, rgb) {
                     Some(b) => b,
                     None => {
                         eprintln!("[tx_av][video] size mismatch");
                         continue;
                     }
                 };
+
                 jpeg_buf.clear();
                 let mut enc = JpegEncoder::new_with_quality(&mut jpeg_buf, quality);
-                if let Err(e) = enc.encode(&img, use_w, use_h, ColorType::Rgb8) {
+                if let Err(e) = enc.encode(&img, w, h, ColorType::Rgb8) {
                     eprintln!("[tx_av][video] jpeg err: {e}");
                     continue;
                 }
+
                 let pkt = match s_video.encrypt_frame(&jpeg_buf) {
                     Ok(p) => p,
                     Err(e) => {
@@ -235,14 +298,18 @@ fn main() -> Result<()> {
                         continue;
                     }
                 };
+
                 if inspect && (n % 30 == 0) {
                     inspect_packet_compact("[TX][VID]", pkt);
                 }
+
                 if let Err(e) = send_frame(&stream, SID_VIDEO, pkt) {
                     eprintln!("[tx_av][video] send err: {e}");
                     break;
                 }
+
                 n = n.wrapping_add(1);
+
                 let elapsed = last.elapsed();
                 if elapsed < frame_dt {
                     thread::sleep(frame_dt - elapsed);
@@ -252,21 +319,31 @@ fn main() -> Result<()> {
         });
     }
 
-    // ----------------- AUDIO thread -----------------
+    /* ─────────── THREAD AUDIO ─────────── */
     {
         let stream = Arc::clone(&stream);
         let mut s_audio = s_audio;
+
         thread::spawn(move || {
             let host = cpal::default_host();
-            let dev = host
-                .default_input_device()
-                .expect("no default input device");
-            let config = dev
-                .default_input_config()
-                .expect("no default input config");
+            let dev = match host.default_input_device() {
+                Some(d) => d,
+                None => {
+                    eprintln!("[tx_av][audio] no default input device");
+                    return;
+                }
+            };
+            let config = match dev.default_input_config() {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("[tx_av][audio] no default input config: {e}");
+                    return;
+                }
+            };
 
             let sample_rate = config.sample_rate().0 as usize;
             let channels = config.channels() as usize;
+
             eprintln!(
                 "[tx_av][audio] input {:?} {:?}Hz {}ch",
                 config.sample_format(),
@@ -274,8 +351,7 @@ fn main() -> Result<()> {
                 channels
             );
 
-            // Raggruppa ~20ms per pacchetto
-            let chunk_frames = (sample_rate / 50).max(1); // ~20ms
+            let chunk_frames = (sample_rate / 50).max(1);
             let mut acc_i16: Vec<i16> = Vec::with_capacity(chunk_frames * channels);
 
             let err_fn = |e| eprintln!("[tx_av][audio] stream err: {e}");
@@ -296,9 +372,7 @@ fn main() -> Result<()> {
                                         return;
                                     }
                                 };
-                                if let Err(e) = send_frame(&stream, SID_AUDIO, pkt) {
-                                    eprintln!("[tx_av][audio] send err: {e}");
-                                }
+                                let _ = send_frame(&stream, SID_AUDIO, pkt);
                                 acc_i16.clear();
                             }
                         },
@@ -306,11 +380,11 @@ fn main() -> Result<()> {
                         None,
                     )
                     .expect("build input I16"),
+
                 cpal::SampleFormat::U16 => dev
                     .build_input_stream(
                         &config.clone().into(),
                         move |data: &[u16], _| {
-                            // center to i16
                             acc_i16.extend(data.iter().map(|&x| (x as i32 - 32768) as i16));
                             if acc_i16.len() >= chunk_frames * channels {
                                 let pkt = match s_audio.encrypt_frame(bytemuck::cast_slice(&acc_i16))
@@ -322,9 +396,7 @@ fn main() -> Result<()> {
                                         return;
                                     }
                                 };
-                                if let Err(e) = send_frame(&stream, SID_AUDIO, pkt) {
-                                    eprintln!("[tx_av][audio] send err: {e}");
-                                }
+                                let _ = send_frame(&stream, SID_AUDIO, pkt);
                                 acc_i16.clear();
                             }
                         },
@@ -332,12 +404,14 @@ fn main() -> Result<()> {
                         None,
                     )
                     .expect("build input U16"),
+
                 cpal::SampleFormat::F32 => dev
                     .build_input_stream(
                         &config.into(),
                         move |data: &[f32], _| {
                             acc_i16.extend(data.iter().map(|&x| {
-                                let v = (x * i16::MAX as f32).clamp(i16::MIN as f32, i16::MAX as f32);
+                                let v = (x * i16::MAX as f32)
+                                    .clamp(i16::MIN as f32, i16::MAX as f32);
                                 v as i16
                             }));
                             if acc_i16.len() >= chunk_frames * channels {
@@ -350,9 +424,7 @@ fn main() -> Result<()> {
                                         return;
                                     }
                                 };
-                                if let Err(e) = send_frame(&stream, SID_AUDIO, pkt) {
-                                    eprintln!("[tx_av][audio] send err: {e}");
-                                }
+                                let _ = send_frame(&stream, SID_AUDIO, pkt);
                                 acc_i16.clear();
                             }
                         },
@@ -360,17 +432,21 @@ fn main() -> Result<()> {
                         None,
                     )
                     .expect("build input F32"),
-                _ => panic!("Formato audio non gestito"),
+
+                _ => {
+                    eprintln!("[tx_av][audio] formato audio non gestito");
+                    return;
+                }
             };
 
-            stream_in.play().expect("start input");
+            let _ = stream_in.play();
+
             loop {
                 thread::sleep(Duration::from_secs(3600));
             }
         });
     }
 
-    // Thread principale dorme: i due thread fanno il lavoro
     loop {
         thread::sleep(Duration::from_secs(3600));
     }

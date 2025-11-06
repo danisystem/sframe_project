@@ -1,37 +1,40 @@
 [package]
 name = "sframe_test"
 version = "0.1.0"
-edition = "2024"
+edition = "2024"   # se su Mac dovessi avere warning/errore con 2024, metti "2021"
 
 [features]
 sframe-ring = ["sframe/ring"]
 sframe-openssl = ["sframe/openssl"]
 sframe-rust-crypto = ["sframe/rust-crypto"]
-default = ["sframe-rust-crypto"]   # <— usiamo rust-crypto come default
+default = ["sframe-rust-crypto"]
 
 [dependencies]
-cpal = "0.15"                 # capture/playback audio
-crossbeam-channel = "0.5"     # canali tra thread (capture -> crypto/send)
+cpal = "0.15"
+crossbeam-channel = "0.5"
 anyhow = "1"
 log = "0.4"
-simple_logger = "5"         # logger semplice per Windows
+simple_logger = "5"
 clap = { version = "4", features = ["derive"] }
 
 sframe = { git = "https://github.com/TobTheRock/sframe-rs.git", branch = "main", default-features = false }
 hex = "0.4.3"
 ctrlc = "3"
 
-# --- aggiungi/lascia queste dipendenze (oltre alle tue già presenti) ---
+# Image: va bene 0.24 (JpegEncoder è in image::codecs::jpeg già qui)
 image = { version = "0.24", default-features = false, features = ["jpeg", "png"] }
-minifb = "0.25"
-nokhwa = { version = "0.10.9", features = ["input-msmf"] }
 
+minifb = "0.25"
 pixels = "0.13"
 bytemuck = "1.15"
 winit = "0.28"
 softbuffer = "0.3"
 
-
+# 👇 FIX CROSS-PLATFORM: usa il backend “nativo” a seconda dell’OS
+# - macOS → AVFoundation
+# - Windows → MediaFoundation (MSMF)
+# - Linux → v4l2
+nokhwa = { version = "0.10.9", default-features = false, features = ["input-native"] }
 
 [[bin]]
 name = "tx_audio"
@@ -65,6 +68,5 @@ path = "src/rx_av.rs"
 name = "av_peer"
 path = "src/av_peer.rs"
 
-
 [dev-dependencies]
-pretty_assertions = "1"      # usata solo nei test di sender/receiver
+pretty_assertions = "1"
