@@ -23,7 +23,7 @@ use std::{
 };
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use image::{ColorType, GenericImageView, ImageBuffer, Rgb};
+use image::{ColorType, ImageBuffer, Rgb};
 use image::codecs::jpeg::JpegEncoder;
 
 use nokhwa::pixel_format::RgbFormat;
@@ -175,7 +175,7 @@ fn main() -> Result<()> {
     }
 
     // Connessione TCP
-    let stream = if args[1] == "--bind" {
+    let base_stream = if args[1] == "--bind" {
         let port = &args[2];
         let listener = TcpListener::bind(format!("0.0.0.0:{}", port))?;
         println!("[peer_av] listening on 0.0.0.0:{}", port);
@@ -185,7 +185,11 @@ fn main() -> Result<()> {
         println!("[peer_av] connecting {} ...", addr);
         let s = TcpStream::connect(addr)?; s.set_nodelay(true)?; s
     };
-    let stream = Arc::new(Mutex::new(stream));
+
+    // IMPORTANTISSIMO per il full‑duplex: uno stream dedicato per RX (senza mutex)
+    // e un clone separato (con Mutex) per TX. Evita deadlock read-hold → write bloccate.
+    let mut stream_read = base_stream;
+    let stream_write = Arc::new(Mutex::new(stream_read.try_clone()?));
 
     // SFrame (Sender/Receiver)
     let mut s_audio = Sender::with_cipher_suite(key_audio, suite);
@@ -246,28 +250,44 @@ fn main() -> Result<()> {
     // THREAD RX: legge dal TCP, decifra e smista ad audio/video
     {
         let fb_video = fb_video.clone();
-        let stream_rx = Arc::clone(&stream);
+        // stream dedicato per read, SENZA mutex
+        let mut tcp = stream_read;
         thread::spawn(move || {
             let mut buf = Vec::new();
             // Receiver separati (possono mantenere stato/ratcheting)
             let mut r_audio = r_audio;
             let mut r_video = r_video;
             loop {
-                let (sid, pkt) = {
-                    let mut guard = stream_rx.lock().unwrap();
-                    match recv_frame(&mut *guard, &mut buf) { Ok(v) => v, Err(e) => { eprintln!("[peer_av][RX] tcp read err: {e}"); break; } }
+                let (sid, pkt) = match recv_frame(&mut tcp, &mut buf) {
+                    Ok(v) => v,
+                    Err(e) => { eprintln!("[peer_av][RX] tcp read err: {e}"); break; }
                 };
-                if inspect { match sid { SID_VIDEO => inspect_packet_compact("[RX][VID]", pkt), SID_AUDIO => inspect_packet_compact("[RX][AUD]", pkt), _ => inspect_packet_compact("[RX][UNK]", pkt), } }
+                if inspect {
+                    match sid {
+                        SID_VIDEO => inspect_packet_compact("[RX][VID]", pkt),
+                        SID_AUDIO => inspect_packet_compact("[RX][AUD]", pkt),
+                        _ => inspect_packet_compact("[RX][UNK]", pkt),
+                    }
+                }
                 match sid {
                     SID_VIDEO => {
-                        let plain = match r_video.decrypt_frame(pkt) { Ok(p) => p, Err(e) => { eprintln!("[peer_av][video] decrypt err: {e:?}"); continue; } };
-                        let img = match image::load_from_memory(plain) { Ok(i) => i.to_rgba8(), Err(e) => { eprintln!("[peer_av][video] jpeg decode err: {e}"); continue; } };
+                        let plain = match r_video.decrypt_frame(pkt) {
+                            Ok(p) => p,
+                            Err(e) => { eprintln!("[peer_av][video] decrypt err: {e:?}"); continue; }
+                        };
+                        let img = match image::load_from_memory(plain) {
+                            Ok(i) => i.to_rgba8(),
+                            Err(e) => { eprintln!("[peer_av][video] jpeg decode err: {e}"); continue; }
+                        };
                         let (w,h) = img.dimensions();
                         let mut fb = fb_video.lock().unwrap();
                         fb.0 = w as usize; fb.1 = h as usize; fb.2 = img.into_raw();
                     }
                     SID_AUDIO => {
-                        let plain = match r_audio.decrypt_frame(pkt) { Ok(p) => p, Err(e) => { eprintln!("[peer_av][audio] decrypt err: {e:?}"); continue; } };
+                        let plain = match r_audio.decrypt_frame(pkt) {
+                            Ok(p) => p,
+                            Err(e) => { eprintln!("[peer_av][audio] decrypt err: {e:?}"); continue; }
+                        };
                         let slice_i16: &[i16] = bytemuck::cast_slice(plain);
                         let _ = tx_pcm.try_send(slice_i16.to_vec());
                     }
@@ -279,7 +299,7 @@ fn main() -> Result<()> {
 
     // THREAD TX VIDEO — **stessa sequenza del tuo tx_av.rs (mac‑critical)**
     {
-        let stream = Arc::clone(&stream);
+        let stream = Arc::clone(&stream_write);
         let mut s_video = s_video;
         thread::spawn(move || {
             // PROBE
@@ -327,7 +347,7 @@ fn main() -> Result<()> {
 
     // THREAD TX AUDIO — **stessa sequenza del tuo tx_av.rs**
     {
-        let stream = Arc::clone(&stream);
+        let stream = Arc::clone(&stream_write);
         let mut s_audio = s_audio;
         thread::spawn(move || {
             let host = cpal::default_host();
