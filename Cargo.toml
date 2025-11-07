@@ -22,7 +22,9 @@ hex = "0.4.3"
 ctrlc = "3"
 
 # Image: va bene 0.24 (JpegEncoder è in image::codecs::jpeg già qui)
-image = { version = "0.24", default-features = false, features = ["jpeg", "png"] }
+
+image = { version = "0.24.9", default-features = true, features = ["jpeg", "png"] }
+
 
 minifb = "0.25"
 pixels = "0.13"
@@ -65,8 +67,8 @@ name = "rx_av"
 path = "src/rx_av.rs"
 
 [[bin]]
-name = "av_peer"
-path = "src/av_peer.rs"
+name = "peer_av"
+path = "src/peer_av.rs"
 
 [dev-dependencies]
 pretty_assertions = "1"
