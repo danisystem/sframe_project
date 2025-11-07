@@ -343,20 +343,27 @@ fn main() -> Result<()> {
                             Ok(p) => p,
                             Err(e) => { eprintln!("[peer_av][audio] decrypt err: {e:?}"); continue; }
                         };
-                        // payload con header: [u32 src_sr LE][u8 src_ch][PCM i16...]
-                        let (src_sr, src_ch, pcm_bytes) = if plain.len() >= 5 {
+                        // payload con header: [u32 src_sr LE][u8 src_ch][u8 pad][PCM i16...]
+                        let (src_sr, src_ch, pcm_bytes) = if plain.len() >= 6 {
+                            let sr = u32::from_le_bytes([plain[0], plain[1], plain[2], plain[3]]);
+                            let ch = plain[4] as usize;
+                            (sr.max(1), ch.max(1), &plain[6..])
+                        } else if plain.len() >= 5 {
+                            // vecchio formato senza pad
                             let sr = u32::from_le_bytes([plain[0], plain[1], plain[2], plain[3]]);
                             let ch = plain[4] as usize;
                             (sr.max(1), ch.max(1), &plain[5..])
                         } else {
                             // retro‑compat: stima da chunk ~20ms assumendo stereo
-                            let in_i16: &[i16] = bytemuck::cast_slice(&plain);
-                            let frames_in = in_i16.len() / 2;
+                            let frames_in = (plain.len()/2) / 2; // /2 byte->i16, /2 stereo
                             let est = (frames_in as u32).saturating_mul(50).max(1);
                             (est, 2, &plain[..])
                         };
-                        let in_i16: &[i16] = bytemuck::cast_slice(pcm_bytes);
-                        let remixed   = remix_channels_i16(in_i16, src_ch, out_ch);
+                        // conversione sicura u8 LE -> i16 (evita problemi di alignment)
+                        let mut in_i16: Vec<i16> = Vec::with_capacity(pcm_bytes.len()/2);
+                        for chnk in pcm_bytes.chunks_exact(2) { in_i16.push(i16::from_le_bytes([chnk[0], chnk[1]])); }
+
+                        let remixed   = remix_channels_i16(&in_i16, src_ch, out_ch);
                         let resampled = resample_linear_i16(&remixed, src_sr, out_sr, out_ch);
                         let _ = tx_pcm.try_send(resampled);
                     }
@@ -377,6 +384,13 @@ fn main() -> Result<()> {
                 Ok(c) => c, Err(e) => { eprintln!("[peer_av][tx][video] open cam (probe) err: {e}"); return; }
             };
             let mut fmts = cam.compatible_camera_formats().unwrap_or_default();
+
+            // priorità a fps alti
+            let mut filtered: Vec<_> = fmts.iter().cloned().filter(|f| f.frame_rate() >= want_fps).collect();
+            if filtered.is_empty() { filtered = fmts.iter().cloned().filter(|f| f.frame_rate() >= 25).collect(); }
+            if filtered.is_empty() { filtered = fmts.clone(); }
+            fmts = filtered;
+
             // preferenze formato
             if prefer_mjpeg {
                 let only: Vec<_> = fmts.iter().cloned().filter(|f| matches!(f.format(), FrameFormat::MJPEG)).collect();
@@ -406,16 +420,35 @@ fn main() -> Result<()> {
 
             if let Err(e) = cam.open_stream() { eprintln!("[peer_av][tx][video] open_stream err: {e}"); return; }
 
-            let cf = cam.camera_format();
+            let mut cf = cam.camera_format();
             eprintln!(
                 "[peer_av][tx][video] attivo {}x{} @{} {:?}",
                 cf.resolution().width(), cf.resolution().height(), cf.frame_rate(), cf.format()
             );
 
-            let use_fps = cf.frame_rate().max(1);
-            let frame_dt = Duration::from_millis((1000 / use_fps) as u64);
+            let mut use_fps = cf.frame_rate().max(1);
+            let mut frame_dt = Duration::from_millis((1000 / use_fps) as u64);
+
+            // Fallback automatico se fps negoziato <= 1
             if use_fps <= 1 {
-                eprintln!("[peer_av][tx][video] WARNING: driver ha negoziato {} fps; prova --prefer-nv12 o risoluzione più bassa.", use_fps);
+                eprintln!("[peer_av][tx][video] WARNING: driver ha negoziato {} fps; provo fallback 640x360@>=25.", use_fps);
+                if let Ok(all) = cam.compatible_camera_formats() {
+                    if let Some(fb) = all.into_iter().filter(|f|
+                        f.resolution().width()==640 && f.resolution().height()==360 && f.frame_rate()>=25
+                    ).next() {
+                        let mk_index = || CameraIndex::Index(device);
+                        let req = RequestedFormat::new::<RgbFormat>(RequestedFormatType::Closest(fb));
+                        if let Ok(mut cam2) = Camera::new(mk_index(), req) {
+                            if cam2.open_stream().is_ok() {
+                                cam = cam2;
+                                cf = cam.camera_format();
+                                use_fps = cf.frame_rate().max(1);
+                                frame_dt = Duration::from_millis((1000 / use_fps) as u64);
+                                eprintln!("[peer_av][tx][video] fallback attivo {}x{} @{} {:?}", cf.resolution().width(), cf.resolution().height(), cf.frame_rate(), cf.format());
+                            }
+                        }
+                    }
+                }
             }
 
             let mut last = Instant::now();
@@ -424,10 +457,7 @@ fn main() -> Result<()> {
 
             loop {
                 let rgb = match cam.frame() {
-                    Ok(f) => match f.decode_image::<RgbFormat>() {
-                        Ok(x) => x,
-                        Err(e) => { eprintln!("[peer_av][tx][video] decode err: {e}"); continue; }
-                    },
+                    Ok(f) => match f.decode_image::<RgbFormat>() { Ok(x) => x, Err(e) => { eprintln!("[peer_av][tx][video] decode err: {e}"); continue; } },
                     Err(e) => { eprintln!("[peer_av][tx][video] frame err: {e}"); continue; }
                 };
 
@@ -435,28 +465,18 @@ fn main() -> Result<()> {
                 let (w, h) = (cf.resolution().width(), cf.resolution().height());
 
                 let img: ImageBuffer<Rgb<u8>, _> = match ImageBuffer::from_raw(w, h, rgb) {
-                    Some(b) => b,
-                    None => { eprintln!("[peer_av][tx][video] size mismatch"); continue; }
+                    Some(b) => b, None => { eprintln!("[peer_av][tx][video] size mismatch"); continue; }
                 };
 
                 jpeg_buf.clear();
                 let mut enc = JpegEncoder::new_with_quality(&mut jpeg_buf, quality);
-                if let Err(e) = enc.encode(&img, w, h, ColorType::Rgb8) {
-                    eprintln!("[peer_av][tx][video] jpeg err: {e}");
-                    continue;
-                }
+                if let Err(e) = enc.encode(&img, w, h, ColorType::Rgb8) { eprintln!("[peer_av][tx][video] jpeg err: {e}"); continue; }
 
-                let pkt = match s_video.encrypt_frame(&jpeg_buf) {
-                    Ok(p) => p,
-                    Err(e) => { eprintln!("[peer_av][tx][video] sframe err: {e:?}"); continue; }
-                };
+                let pkt = match s_video.encrypt_frame(&jpeg_buf) { Ok(p) => p, Err(e) => { eprintln!("[peer_av][tx][video] sframe err: {e:?}"); continue; } };
 
                 if inspect && (n % 30 == 0) { inspect_packet_compact("[TX][VID]", pkt); }
 
-                if let Err(e) = send_frame(&stream, SID_VIDEO, pkt) {
-                    eprintln!("[peer_av][tx][video] send err: {e}");
-                    break;
-                }
+                if let Err(e) = send_frame(&stream, SID_VIDEO, pkt) { eprintln!("[peer_av][tx][video] send err: {e}"); break; }
 
                 n = n.wrapping_add(1);
 
@@ -467,7 +487,7 @@ fn main() -> Result<()> {
         });
     }
 
-    // THREAD TX AUDIO — **con header SR/channels nel payload**
+    // THREAD TX AUDIO — **con header SR/channels + pad nel payload**
     {
         let stream = Arc::clone(&stream_write);
         let mut s_audio = s_audio;
@@ -484,11 +504,12 @@ fn main() -> Result<()> {
                 cpal::SampleFormat::I16 => dev.build_input_stream(&config.into(), move |data: &[i16], _| {
                     acc_i16.extend_from_slice(data);
                     if acc_i16.len() >= chunk_frames * channels {
-                        // payload: [u32 src_sr LE][u8 src_ch][PCM i16...]
-                        let mut payload = Vec::with_capacity(5 + acc_i16.len()*2);
+                        // payload: [u32 src_sr LE][u8 src_ch][u8 pad=0][PCM i16...]
+                        let mut payload = Vec::with_capacity(6 + acc_i16.len()*2);
                         let sr_le = (sample_rate as u32).to_le_bytes();
                         payload.extend_from_slice(&sr_le);
                         payload.push(channels as u8);
+                        payload.push(0u8); // pad per allineare i16
                         payload.extend_from_slice(bytemuck::cast_slice(&acc_i16));
                         let pkt = match s_audio.encrypt_frame(&payload) { Ok(p) => p, Err(e) => { eprintln!("[peer_av][tx][audio] sframe err: {e:?}"); acc_i16.clear(); return; } };
                         let _ = send_frame(&stream, SID_AUDIO, pkt); acc_i16.clear();
@@ -497,10 +518,11 @@ fn main() -> Result<()> {
                 cpal::SampleFormat::U16 => dev.build_input_stream(&config.clone().into(), move |data: &[u16], _| {
                     acc_i16.extend(data.iter().map(|&x| (x as i32 - 32768) as i16));
                     if acc_i16.len() >= chunk_frames * channels {
-                        let mut payload = Vec::with_capacity(5 + acc_i16.len()*2);
+                        let mut payload = Vec::with_capacity(6 + acc_i16.len()*2);
                         let sr_le = (sample_rate as u32).to_le_bytes();
                         payload.extend_from_slice(&sr_le);
                         payload.push(channels as u8);
+                        payload.push(0u8);
                         payload.extend_from_slice(bytemuck::cast_slice(&acc_i16));
                         let pkt = match s_audio.encrypt_frame(&payload) { Ok(p) => p, Err(e) => { eprintln!("[peer_av][tx][audio] sframe err: {e:?}"); acc_i16.clear(); return; } };
                         let _ = send_frame(&stream, SID_AUDIO, pkt); acc_i16.clear();
@@ -509,10 +531,11 @@ fn main() -> Result<()> {
                 cpal::SampleFormat::F32 => dev.build_input_stream(&config.into(), move |data: &[f32], _| {
                     acc_i16.extend(data.iter().map(|&x| { let v = (x * i16::MAX as f32).clamp(i16::MIN as f32, i16::MAX as f32); v as i16 }));
                     if acc_i16.len() >= chunk_frames * channels {
-                        let mut payload = Vec::with_capacity(5 + acc_i16.len()*2);
+                        let mut payload = Vec::with_capacity(6 + acc_i16.len()*2);
                         let sr_le = (sample_rate as u32).to_le_bytes();
                         payload.extend_from_slice(&sr_le);
                         payload.push(channels as u8);
+                        payload.push(0u8);
                         payload.extend_from_slice(bytemuck::cast_slice(&acc_i16));
                         let pkt = match s_audio.encrypt_frame(&payload) { Ok(p) => p, Err(e) => { eprintln!("[peer_av][tx][audio] sframe err: {e:?}"); acc_i16.clear(); return; } };
                         let _ = send_frame(&stream, SID_AUDIO, pkt); acc_i16.clear();
