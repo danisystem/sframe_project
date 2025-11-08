@@ -1,0 +1,28 @@
+<!doctype html>
+<html>
+  <head><meta charset="utf-8"><title>SFrame Receiver</title></head>
+  <body>
+    <h2>Receiver (Decrypt)</h2>
+    <video id="remote" autoplay playsinline style="width:480px;background:#000"></video>
+    <div>
+      <label>Secret: <input id="secret" value="SUPER_SECRET"></label>
+      <label>Suite:
+        <select id="suite">
+          <option value="">aes-gcm256-sha512 (default)</option>
+          <option value="aes-gcm128-sha256">aes-gcm128-sha256</option>
+        </select>
+      </label>
+    </div>
+
+    <button id="prep">Prepare & Create Answer</button>
+
+    <h3>Paste Sender Offer</h3>
+    <textarea id="offer" rows="10" cols="80"></textarea><br/>
+    <button id="setOffer">Set Remote Offer</button>
+
+    <h3>Answer (copy this back to Sender)</h3>
+    <textarea id="answer" rows="10" cols="80"></textarea>
+
+    <script type="module" src="./receiver.js"></script>
+  </body>
+</html>

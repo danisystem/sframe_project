@@ -1,0 +1,20 @@
+<!doctype html>
+<html>
+  <head><meta charset="utf-8"><title>SFrame Web Test</title></head>
+  <body style="background:#111;color:#eee;font-family:sans-serif">
+    <h2>SFrame WASM – Encrypt / Decrypt Demo</h2>
+    <button id="start">Start</button>
+    <p id="info"></p>
+    <div style="display:flex;gap:20px;margin-top:20px">
+      <div>
+        <h3>Encrypt (local camera)</h3>
+        <video id="local" autoplay playsinline muted width="480" height="360" style="background:#000"></video>
+      </div>
+      <div>
+        <h3>Decrypt (remote)</h3>
+        <video id="remote" autoplay playsinline width="480" height="360" style="background:#000"></video>
+      </div>
+    </div>
+    <script type="module" src="./main.js"></script>
+  </body>
+</html>
