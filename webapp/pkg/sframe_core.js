@@ -105,6 +105,32 @@ function getArrayU8FromWasm0(ptr, len) {
     ptr = ptr >>> 0;
     return getUint8ArrayMemory0().subarray(ptr / 1, ptr / 1 + len);
 }
+/**
+ * Ispezione compatta del pacchetto SFrame (NON mostra il ciphertext).
+ * Stampa: kid, ctr, aad_len(=header), ct_len, tag_len, header_hex.
+ * @param {Uint8Array} packet
+ * @returns {string}
+ */
+export function sframe_inspect(packet) {
+    let deferred3_0;
+    let deferred3_1;
+    try {
+        const ptr0 = passArray8ToWasm0(packet, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.sframe_inspect(ptr0, len0);
+        var ptr2 = ret[0];
+        var len2 = ret[1];
+        if (ret[3]) {
+            ptr2 = 0; len2 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred3_0 = ptr2;
+        deferred3_1 = len2;
+        return getStringFromWasm0(ptr2, len2);
+    } finally {
+        wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
+    }
+}
 
 const WasmPeerFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
@@ -124,6 +150,8 @@ export class WasmPeer {
         wasm.__wbg_wasmpeer_free(ptr, 0);
     }
     /**
+     * key_audio/key_video: KeyId; suite: "aes-gcm128-sha256" | (default) aes-gcm256-sha512
+     * secret: materiale segreto condiviso per derive della chiave.
      * @param {number} key_audio
      * @param {number} key_video
      * @param {string | null | undefined} suite
