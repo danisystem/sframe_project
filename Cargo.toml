@@ -1,42 +1,68 @@
 [package]
 name = "sframe_test"
 version = "0.1.0"
-edition = "2024"   # se su Mac dovessi avere warning/errore con 2024, metti "2021"
+edition = "2024"   # su Mac puoi usare anche "2021" se avessi warning
 
 [features]
+# Backend crittografici sframe
 sframe-ring = ["sframe/ring"]
 sframe-openssl = ["sframe/openssl"]
 sframe-rust-crypto = ["sframe/rust-crypto"]
-default = ["sframe-rust-crypto"]
+
+# Abilita le dipendenze native (binari, GUI, camera, ecc.)
+native = [
+  "cpal",
+  "nokhwa",
+  "image",
+  "minifb",
+  "pixels",
+  "bytemuck",
+  "winit",
+  "softbuffer",
+  "ctrlc",
+  "simple_logger",
+]
+
+# Segnaposto per build web/wasm
+web = []
+
+# Default: come prima + parte native attiva
+default = ["sframe-rust-crypto", "native"]
+
+[lib]
+name = "sframe_core"
+crate-type = ["rlib", "cdylib"]   # rlib per i binari, cdylib per wasm-bindgen
 
 [dependencies]
-cpal = "0.15"
-crossbeam-channel = "0.5"
 anyhow = "1"
 log = "0.4"
-simple_logger = "5"
 clap = { version = "4", features = ["derive"] }
-
-sframe = { git = "https://github.com/TobTheRock/sframe-rs.git", branch = "main", default-features = false }
+crossbeam-channel = "0.5"
 hex = "0.4.3"
-ctrlc = "3"
 
-# Image: va bene 0.24 (JpegEncoder è in image::codecs::jpeg già qui)
+# RNG compatibile anche su Web (getrandom usa WebCrypto su wasm32)
+getrandom = { version = "0.2", features = ["js"] }
+rand = "0.8"
 
-image = { version = "0.24.9", default-features = true, features = ["jpeg", "png"] }
+# SFrame dal tuo repo, senza default features
+sframe = { git = "https://github.com/TobTheRock/sframe-rs.git", branch = "main", default-features = false }
 
+# ── Dipendenze NATIVE rese opzionali ────────────────────────────────────────────
+cpal        = { version = "0.15", optional = true }
+image       = { version = "0.24.9", default-features = true, features = ["jpeg", "png"], optional = true }
+minifb      = { version = "0.25", optional = true }
+pixels      = { version = "0.13", optional = true }
+bytemuck    = { version = "1.15", optional = true }
+winit       = { version = "0.28", optional = true }
+softbuffer  = { version = "0.3", optional = true }
+nokhwa      = { version = "0.10.9", default-features = false, features = ["input-native"], optional = true }
+ctrlc       = { version = "3", optional = true }
+simple_logger = { version = "5", optional = true }
 
-minifb = "0.25"
-pixels = "0.13"
-bytemuck = "1.15"
-winit = "0.28"
-softbuffer = "0.3"
-
-# 👇 FIX CROSS-PLATFORM: usa il backend “nativo” a seconda dell’OS
-# - macOS → AVFoundation
-# - Windows → MediaFoundation (MSMF)
-# - Linux → v4l2
-nokhwa = { version = "0.10.9", default-features = false, features = ["input-native"] }
+# ── Dipendenze SOLO per wasm ───────────────────────────────────────────────────
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "=0.2.105"
+# console_error_panic_hook = "0.1"   # opzionale per panics leggibili
 
 [[bin]]
 name = "tx_audio"
