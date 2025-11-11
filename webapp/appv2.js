@@ -138,8 +138,12 @@ window.addEventListener("DOMContentLoaded", async () => {
         log("Answer inviata");
 
       } else if (msg.type === "answer" && !pc.currentRemoteDescription) {
+        try {
         await pc.setRemoteDescription(msg.data);
         log("Answer ricevuta");
+      } catch(e) {
+      err("setRemoteDescription(answer)", e);
+    }
       } else if (msg.type === "candidate") {
         try { await pc.addIceCandidate(msg.data); } catch (e) { err("addIceCandidate", e); }
       }
