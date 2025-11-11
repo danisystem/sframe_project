@@ -3,28 +3,28 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>SFrame WebRTC (Bi-dir)</title>
+  <title>SFrame WebRTC Full-Duplex</title>
   <style>
     body { background:#111; color:#eee; font-family:system-ui,sans-serif; margin:0; padding:16px; }
-    h1 { color:#6cf; margin:0 0 12px; }
+    h1 { color:#6cf; margin-bottom:8px; }
     #controls { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-bottom:12px; }
-    input, select, button, label { padding:6px 10px; border-radius:6px; border:1px solid #333; background:#222; color:#eee; }
+    input, button { padding:6px 10px; border-radius:6px; border:1px solid #333; background:#222; color:#eee; }
     button { cursor:pointer; }
     video { width:46%; background:#000; margin:6px; border-radius:8px; border:1px solid #333; }
-    #debug { font:12px/1.35 monospace; white-space:pre-wrap; background:#000; color:#0f0; padding:8px; border-radius:8px; max-height:240px; overflow:auto; }
+    #debug { font:12px/1.4 monospace; white-space:pre-wrap; background:#000; color:#0f0;
+             padding:8px; border-radius:8px; max-height:220px; overflow:auto; }
     #boot { background:#1b4; color:#fff; padding:4px 8px; border-radius:6px; display:inline-block; margin-bottom:8px; }
   </style>
 </head>
 <body>
   <div id="boot">BOOT: caricamento…</div>
-  <h1>SFrame WebRTC (bi-directional)</h1>
+  <h1>SFrame Full-Duplex Demo</h1>
 
   <div id="controls">
     <label>WS URL <input id="wsurl" value="ws://localhost:3001" size="24"></label>
     <label>Room <input id="room" value="test123" size="10"></label>
     <label>Secret <input id="secret" value="SUPER_SECRET" size="14"></label>
-    <label>Suite <input id="suite" value="" size="18" placeholder="(vuoto = aes-gcm256-sha512)"></label>
-    <label><input type="checkbox" id="caller"> Caller (make offer)</label>
+    <label>Suite <input id="suite" value="" size="16" placeholder="(default aes-gcm256-sha512)"></label>
     <button id="start">Start</button>
     <button id="unmute">Unmute</button>
   </div>
@@ -36,7 +36,6 @@
 
   <div id="debug">[debug]</div>
 
-  <!-- usa la nuova logica -->
-  <script type="module" src="./app.v2.js"></script>
+  <script type="module" src="./appv2.js"></script>
 </body>
 </html>

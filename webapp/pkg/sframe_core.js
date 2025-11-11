@@ -106,8 +106,7 @@ function getArrayU8FromWasm0(ptr, len) {
     return getUint8ArrayMemory0().subarray(ptr / 1, ptr / 1 + len);
 }
 /**
- * Ispezione compatta del pacchetto SFrame (NON mostra il ciphertext).
- * Stampa: kid, ctr, aad_len(=header), ct_len, tag_len, header_hex.
+ * Analisi compatta di un pacchetto SFrame (solo header, no plaintext)
  * @param {Uint8Array} packet
  * @returns {string}
  */
@@ -135,8 +134,18 @@ export function sframe_inspect(packet) {
 const WasmPeerFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_wasmpeer_free(ptr >>> 0, 1));
-
+/**
+ * Rappresenta un peer con 4 chiavi distinte (audio/video per TX e RX)
+ */
 export class WasmPeer {
+
+    static __wrap(ptr) {
+        ptr = ptr >>> 0;
+        const obj = Object.create(WasmPeer.prototype);
+        obj.__wbg_ptr = ptr;
+        WasmPeerFinalization.register(obj, obj.__wbg_ptr, obj);
+        return obj;
+    }
 
     __destroy_into_raw() {
         const ptr = this.__wbg_ptr;
@@ -150,8 +159,7 @@ export class WasmPeer {
         wasm.__wbg_wasmpeer_free(ptr, 0);
     }
     /**
-     * key_audio/key_video: KeyId; suite: "aes-gcm128-sha256" | (default) aes-gcm256-sha512
-     * secret: materiale segreto condiviso per derive della chiave.
+     * Costruttore originale (2 keyId condivisi TX/RX)
      * @param {number} key_audio
      * @param {number} key_video
      * @param {string | null | undefined} suite
@@ -169,6 +177,33 @@ export class WasmPeer {
         this.__wbg_ptr = ret[0] >>> 0;
         WasmPeerFinalization.register(this, this.__wbg_ptr, this);
         return this;
+    }
+    /**
+     * 🔄 Nuovo costruttore full-duplex (4 keyId indipendenti)
+     *
+     * # Argomenti
+     * - `tx_audio`, `tx_video`: keyId usati per cifrare i frame locali
+     * - `rx_audio`, `rx_video`: keyId usati per decifrare i frame remoti
+     * - `suite`: opzionale ("aes-gcm128-sha256" o default aes-gcm256-sha512)
+     * - `secret`: materiale condiviso (salt/psk)
+     * @param {number} tx_audio
+     * @param {number} tx_video
+     * @param {number} rx_audio
+     * @param {number} rx_video
+     * @param {string | null | undefined} suite
+     * @param {Uint8Array} secret
+     * @returns {WasmPeer}
+     */
+    static new_full_duplex(tx_audio, tx_video, rx_audio, rx_video, suite, secret) {
+        var ptr0 = isLikeNone(suite) ? 0 : passStringToWasm0(suite, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        var len0 = WASM_VECTOR_LEN;
+        const ptr1 = passArray8ToWasm0(secret, wasm.__wbindgen_malloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmpeer_new_full_duplex(tx_audio, tx_video, rx_audio, rx_video, ptr0, len0, ptr1, len1);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return WasmPeer.__wrap(ret[0]);
     }
     /**
      * @param {Uint8Array} input
