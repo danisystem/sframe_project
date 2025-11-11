@@ -1,10 +1,12 @@
 console.log("[BOOT] appv3.js loaded");
 const $ = (s) => document.querySelector(s);
 const dbg = $("#debug");
-const log = (...a) => { console.log("[app]", ...a); dbg.textContent += "\n" + a.join(" "); };
+const log = (...a) => {
+  console.log("[app]", ...a);
+  dbg.textContent += "\n" + a.join(" ");
+};
 
 import init, { WasmPeer, sframe_inspect } from "./pkg/sframe_core.js";
-
 await init();
 
 const startBtn = $("#start");
@@ -18,8 +20,8 @@ startBtn.onclick = async () => {
 
   const role = prompt("Peer (A o B)?", "A").toUpperCase();
   const map = role === "A"
-    ? { tx: {a:101,v:102}, rx: {a:201,v:202} }
-    : { tx: {a:201,v:202}, rx: {a:101,v:102} };
+    ? { tx: { a: 101, v: 102 }, rx: { a: 201, v: 202 } }
+    : { tx: { a: 201, v: 202 }, rx: { a: 101, v: 102 } };
 
   log(`Avvio ${role} → TX[a=${map.tx.a},v=${map.tx.v}] RX[a=${map.rx.a},v=${map.rx.v}]`);
 
@@ -29,50 +31,82 @@ startBtn.onclick = async () => {
 
   const ws = new WebSocket(wsUrl);
   ws.binaryType = "arraybuffer";
-  ws.onopen = () => log("WS connected", wsUrl);
 
-  ws.onmessage = (ev) => {
-    const buf = new Uint8Array(ev.data);
+  ws.onopen = () => log(`WS connected ${wsUrl}`);
+
+  ws.onerror = (e) => log("WS error", e);
+  ws.onclose = () => log("WS closed");
+
+  ws.onmessage = async (ev) => {
     try {
-      // Tenta di decifrare come video (header SFrame dirà il tipo)
-      const out = peerRX.decrypt_video(buf);
-      const blob = new Blob([out], { type: "video/webm" });
-      remote.src = URL.createObjectURL(blob);
-    } catch {
+      const buf = new Uint8Array(await ev.data);
+      log(`[RX] chunk ${buf.length} bytes`);
+
+      // tenta decrypt come video
       try {
-        const out = peerRX.decrypt_audio(buf);
-        const blob = new Blob([out], { type: "audio/webm" });
-        const a = new Audio(URL.createObjectURL(blob));
-        a.play().catch(()=>{});
-      } catch (e) {
-        log("RX decrypt fail", e);
+        const out = peerRX.decrypt_video(buf);
+        log(`[RX] decrypt video OK (${out.length} bytes)`);
+        const blob = new Blob([out], { type: "video/webm" });
+        remote.src = URL.createObjectURL(blob);
+      } catch (e1) {
+        try {
+          const out = peerRX.decrypt_audio(buf);
+          log(`[RX] decrypt audio OK (${out.length} bytes)`);
+          const a = new Audio(URL.createObjectURL(new Blob([out], { type: "audio/webm" })));
+          a.play().catch(() => {});
+        } catch (e2) {
+          log("RX decrypt fail", e2);
+        }
       }
+    } catch (e) {
+      log("RX error", e);
     }
   };
 
-  // Acquisisci camera/microfono
-  const stream = await navigator.mediaDevices.getUserMedia({ video:true, audio:true });
-  local.srcObject = stream;
-  await local.play();
+  // acquisisci camera/microfono
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+    local.srcObject = stream;
+    await local.play();
+  } catch (e) {
+    log("Errore getUserMedia", e);
+    return;
+  }
 
   const sendFrame = async (track, data) => {
     try {
       const out = track.kind === "video"
         ? peerTX.encrypt_video(data)
         : peerTX.encrypt_audio(data);
+
+      log(`[TX] ${track.kind} chunk ${data.length}B → enc ${out.length}B`);
       ws.send(out);
-    } catch (e) { log("Encrypt/send fail", e); }
+    } catch (e) {
+      log("Encrypt/send fail", e);
+    }
   };
 
-  // Qui uso MediaRecorder come sorgente semplificata (chunk = frame cifrato)
+  // MediaRecorder fallback per browser compatibili
   stream.getTracks().forEach(track => {
-    const rec = new MediaRecorder(new MediaStream([track]), { mimeType:"video/webm;codecs=vp8" });
+    let options = {};
+    try {
+      options = { mimeType: "video/webm;codecs=vp8" };
+      if (!MediaRecorder.isTypeSupported(options.mimeType)) {
+        options = {}; // fallback automatico
+      }
+    } catch { options = {}; }
+
+    const rec = new MediaRecorder(new MediaStream([track]), options);
     rec.ondataavailable = async e => {
       if (e.data && e.data.size > 0) {
         const buf = new Uint8Array(await e.data.arrayBuffer());
+        log(`[TX] raw ${track.kind} ${buf.length} bytes`);
         await sendFrame(track, buf);
       }
     };
-    rec.start(250); // invia chunk ogni 250 ms
+    rec.onerror = e => log(`[TX] recorder error ${track.kind}:`, e.error || e);
+    rec.start(250);
+    log(`[TX] recorder start (${track.kind})`);
   });
 };
