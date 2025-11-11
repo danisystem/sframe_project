@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="UTF-8">
+<title>SFrame Relay Test</title>
+<style>
+body { background:#111; color:#eee; font-family:system-ui; padding:16px; }
+video { width:45%; margin:4px; background:#000; border-radius:8px; border:1px solid #333; }
+#debug { font:12px monospace; background:#000; color:#0f0; padding:6px; border-radius:8px; white-space:pre-wrap; max-height:200px; overflow:auto; }
+</style>
+</head>
+<body>
+<h1>SFrame Relay (full-duplex)</h1>
+<label>WS URL <input id="wsurl" value="ws://localhost:4000" size="28"></label>
+<label>Secret <input id="secret" value="SUPER_SECRET" size="14"></label>
+<button id="start">Start</button>
+
+<div>
+  <video id="local" autoplay muted playsinline></video>
+  <video id="remote" autoplay playsinline></video>
+</div>
+
+<pre id="debug">[debug]</pre>
+
+<script type="module" src="./appv3.js"></script>
+</body>
+</html>
