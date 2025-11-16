@@ -1,4 +1,5 @@
 // src/lib.rs
+#![cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
 use sframe::{CipherSuite, header::SframeHeader};
 
