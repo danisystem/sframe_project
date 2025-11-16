@@ -129,31 +129,18 @@ function cleanup(){
 }
 
 async function toggleMic(){
-  if(!room) return;
-  const lp = room.localParticipant;
-  const pub = lp.getTrackPublications().find(p => p.kind === 'audio');
-  if(!pub) return;
-  if (pub.isMuted) {
-    await lp.unmuteTrack(pub.track);
-    log('Mic UNMUTED');
-  } else {
-    await lp.muteTrack(pub.track);
-    log('Mic MUTED');
-  }
+  if (!room) return;
+  // se è acceso, spegne; se è spento, accende
+  const currently = room.localParticipant.isMicrophoneEnabled;
+  await room.localParticipant.setMicrophoneEnabled(!currently);
+  log(`Mic ${!currently ? 'ON' : 'OFF'}`);
 }
 
 async function toggleCam(){
-  if(!room) return;
-  const lp = room.localParticipant;
-  const pub = lp.getTrackPublications().find(p => p.kind === 'video');
-  if(!pub) return;
-  if (pub.isMuted) {
-    await lp.unmuteTrack(pub.track);
-    log('Cam ON');
-  } else {
-    await lp.muteTrack(pub.track);
-    log('Cam OFF');
-  }
+  if (!room) return;
+  const currently = room.localParticipant.isCameraEnabled;
+  await room.localParticipant.setCameraEnabled(!currently);
+  log(`Cam ${!currently ? 'ON' : 'OFF'}`);
 }
 
 els.btnJoin.addEventListener('click', join);
