@@ -31,7 +31,10 @@
     </label>
     <button id="btnConnect">Connect & Join Room</button>
     <button id="btnHangup" disabled>Hangup</button>
+    <button id="btnToggleMic" disabled>Mic OFF</button>
+    <button id="btnToggleCam" disabled>Cam OFF</button>
   </div>
+
 
   <div class="layout">
     <div class="col">
@@ -47,6 +50,9 @@
     </div>
   </div>
 
+  <!-- Prima inizializziamo SFrame (wasm) -->
+  <script type="module" src="./bootstrap_sframe.js"></script>
+  <!-- Poi la logica VideoRoom + SFrame -->
   <script type="module" src="./appRoom.js"></script>
 </body>
 </html>
