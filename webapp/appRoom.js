@@ -1,9 +1,6 @@
 // appRoom.js
 // Janus VideoRoom multi-dispositivo + SFrame (Insertable Streams)
 
-// ─────────────────────────────────────────────────────────────
-// Import HKDF per derivare le chiavi per-mittente
-// ─────────────────────────────────────────────────────────────
 import { hkdf } from './hkdf.js';
 
 const els = {
@@ -37,28 +34,27 @@ function setConnectedUI(connected) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// SFrame parameters
+// SFrame config
 // ─────────────────────────────────────────────────────────────
+
 const KID_AUDIO = 1;
 const KID_VIDEO = 2;
 const BASE_SECRET = new TextEncoder().encode('DEV-ONLY-BASE-SECRET');
 
-// TX: un solo peer per cifrare i nostri frame
+// TX peer locale
 let txPeer = null;
 
 // Stato Janus
 let ws = null;
 let sessionId = null;
 
-// Handle per il PUBLISHER (noi)
+// Publisher
 let pluginHandlePub = null;
-
-// RTCPeerConnection per pubblicare
 let pcPub = null;
 let localStream = null;
 
-// Mappa: feedId -> info subscriber
-// info: { feedId, display, handleId, pc, videoEl, rxPeer, audioTransceiver, videoTransceiver }
+// Subscriber per feed:
+// { feedId, display, handleId, pc, videoEl, rxPeer }
 const subscribers = new Map();
 
 // ─────────────────────────────────────────────────────────────
@@ -95,8 +91,8 @@ async function ensureTxPeerForLocal() {
   try {
     const secret = await hkdf(BASE_SECRET, `sender=${disp}`);
     txPeer = new window.SFRAME.WasmPeer(
-      KID_AUDIO,  // kid audio
-      KID_VIDEO,  // kid video
+      KID_AUDIO,
+      KID_VIDEO,
       null,
       secret
     );
@@ -201,7 +197,7 @@ function attachSenderTransform(sender, kind) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// Encoded transforms – RX (per ogni feed)
+// Encoded transforms – RX (attach sui receiver reali)
 // ─────────────────────────────────────────────────────────────
 
 function attachReceiverTransform(receiver, kind, info) {
@@ -378,7 +374,7 @@ function handleJanusEvent(msg) {
 function handleJanusTrickle(msg) {
   const c = msg.candidate;
   if (!c) return;
-  // Per semplicità non gestiamo le trickle da Janus (spesso bastano quelle via JSEP)
+  // Per semplicità ignoriamo le trickle da Janus (spesso bastano quelle via JSEP).
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -449,27 +445,23 @@ async function startPublishing() {
       log('pcPub ICE state:', pcPub.iceConnectionState);
     };
 
-    // SFrame TX: prepara il WasmPeer
     const sframeOk = await ensureTxPeerForLocal();
     if (!sframeOk) {
       log('⚠️ SFrame TX non attivo: invieremo in chiaro (solo SRTP).');
     }
 
-    // Media locale
     localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
     els.localVideo.srcObject = localStream;
 
     els.btnToggleMic.textContent = 'Mic OFF';
     els.btnToggleCam.textContent = 'Cam OFF';
 
-    // Audio
     const audioTrack = localStream.getAudioTracks()[0];
     if (audioTrack) {
       const sender = pcPub.addTrack(audioTrack, localStream);
       if (sframeOk) attachSenderTransform(sender, 'audio');
     }
 
-    // Video
     const videoTrack = localStream.getVideoTracks()[0];
     if (videoTrack) {
       const sender = pcPub.addTrack(videoTrack, localStream);
@@ -515,8 +507,6 @@ function subscribeToPublisher(feedId, display) {
     pc: null,
     videoEl: null,
     rxPeer: null,
-    audioTransceiver: null,
-    videoTransceiver: null,
   };
   subscribers.set(feedId, info);
 
@@ -591,7 +581,7 @@ async function handleSubscriberJsep(feedId, info, jsep) {
 
           info.videoEl = vid;
         }
-        if (!info.videoEl.srcObject) {
+        if (!info.videoEl.srcObject && ev.streams[0]) {
           info.videoEl.srcObject = ev.streams[0];
         }
       };
@@ -601,24 +591,23 @@ async function handleSubscriberJsep(feedId, info, jsep) {
       };
 
       info.pc = pc;
-
-      // SFrame RX peer per questo feed
-      await ensureRxPeerForFeed(info);
-
-      // Pre-creiamo transceiver recvonly audio/video e
-      // attacchiamo SUBITO i transform RX
-      info.audioTransceiver = pc.addTransceiver('audio', { direction: 'recvonly' });
-      info.videoTransceiver = pc.addTransceiver('video', { direction: 'recvonly' });
-
-      if (info.rxPeer) {
-        attachReceiverTransform(info.audioTransceiver.receiver, 'audio', info);
-        attachReceiverTransform(info.videoTransceiver.receiver, 'video', info);
-      } else {
-        log(`⚠️ Nessun RX peer per feed=${feedId}: RX in chiaro.`);
-      }
     }
 
     await info.pc.setRemoteDescription(new RTCSessionDescription(jsep));
+
+    // Assicuriamo l'RX peer SFrame per questo feed
+    await ensureRxPeerForFeed(info);
+
+    // Ora agganciamo i transform RX ai receiver REALI (audio/video)
+    const receivers = info.pc.getReceivers();
+    for (const r of receivers) {
+      if (r.track && r.track.kind === 'audio') {
+        attachReceiverTransform(r, 'audio', info);
+      } else if (r.track && r.track.kind === 'video') {
+        attachReceiverTransform(r, 'video', info);
+      }
+    }
+
     const answer = await info.pc.createAnswer();
     await info.pc.setLocalDescription(answer);
 
@@ -661,7 +650,7 @@ function removeSubscriber(feedId) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// Connect / Hangup
+// Connect / Hangup / Cleanup
 // ─────────────────────────────────────────────────────────────
 
 function connectAndJoinRoom() {
