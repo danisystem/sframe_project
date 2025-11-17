@@ -1,13 +1,15 @@
-import init, { WasmPeer, sframe_inspect } from './pkg/sframe_core.js';
+// bootstrap_sframe.js
+import init, { WasmPeer, sframe_inspect as sframeInspect } from './pkg/sframe_core.js';
 
-// inizializza il modulo wasm
-await init();
-
-// Esponi una “facciata” semplice su window.
-// NOTA: qui NON passiamo ctr: lo gestisce il tuo Sender/Receiver dentro WasmPeer.
-window.SFRAME = {
-  WasmPeer,
-  inspect: (u8) => sframe_inspect(u8),
-};
-
-console.log('[bootstrap] SFRAME ready:', !!window.SFRAME.WasmPeer);
+(async () => {
+  try {
+    await init(); // inizializza il modulo wasm
+    window.SFRAME = {
+      WasmPeer,
+      inspect: sframeInspect,
+    };
+    console.log('[bootstrap] SFRAME ready:', !!window.SFRAME.WasmPeer);
+  } catch (e) {
+    console.error('[bootstrap] errore init SFRAME:', e);
+  }
+})();

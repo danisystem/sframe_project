@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8">
+  <title>Janus VideoRoom – Multi-device Broadcast (clear)</title>
+  <style>
+    body { font-family: sans-serif; background: #111; color: #eee; margin: 0; padding: 0; }
+    .topbar { padding: 8px 12px; background: #222; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    .topbar input { padding: 4px; }
+    .topbar button { padding: 4px 8px; }
+    .layout { display: flex; height: calc(100vh - 60px); }
+    .col { flex: 1; padding: 8px; box-sizing: border-box; overflow: auto; }
+    h2 { margin-top: 0; }
+    video { max-width: 100%; background: #000; }
+    #remoteVideos { display: flex; flex-wrap: wrap; gap: 8px; }
+    .remoteBox { border: 1px solid #444; padding: 4px; border-radius: 4px; }
+    .remoteBox label { font-size: 12px; display: block; margin-bottom: 4px; }
+    textarea { width: 100%; height: 100%; box-sizing: border-box; background: #000; color: #0f0; font-family: monospace; font-size: 11px; }
+  </style>
+</head>
+<body>
+  <div class="topbar">
+    <label>WS URL:
+      <input id="wsUrl" size="28" value="ws://localhost:8188/">
+    </label>
+    <label>Room ID:
+      <input id="roomId" size="6" value="1234">
+    </label>
+    <label>Nome/Identity:
+      <input id="displayName" size="12" value="">
+    </label>
+    <button id="btnConnect">Connect & Join Room</button>
+    <button id="btnHangup" disabled>Hangup</button>
+  </div>
+
+  <div class="layout">
+    <div class="col">
+      <h2>Local</h2>
+      <video id="localVideo" autoplay playsinline muted></video>
+
+      <h2>Remote peers</h2>
+      <div id="remoteVideos"></div>
+    </div>
+    <div class="col">
+      <h2>Log</h2>
+      <textarea id="log" readonly></textarea>
+    </div>
+  </div>
+
+  <script type="module" src="./appRoom.js"></script>
+</body>
+</html>
