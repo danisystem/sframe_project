@@ -1,19 +1,51 @@
 // appRoom.js
-// Janus VideoRoom multi-dispositivo + SFrame (Insertable Streams)
+// ─────────────────────────────────────────────────────────────
+// Janus VideoRoom + SFrame (Insertable Streams) + multi-peer
+// ─────────────────────────────────────────────────────────────
+//
+// Layer logici:
+//
+//   1. UI           : gestione bottoni, log, <video> DOM
+//   2. SFrame       : derivazione chiavi, WasmPeer, encrypt/decrypt
+//   3. WebRTC       : RTCPeerConnection (publisher/subscriber)
+//   4. Janus SFU    : signaling via WebSocket (VideoRoom plugin)
+//
+// Il flusso:
+//
+//   - Ogni client entra nella room Janus come PUBLISHER (audio+video).
+//   - Janus annuncia gli altri publisher (feedId, display).
+//   - Per ogni feed remoto creiamo un SUBSCRIBER (RTCPeerConnection).
+//   - SFrame cripta i nostri frame (TX) e decripta quelli remoti (RX).
+//
+// Le chiavi:
+//
+//   - C’è un BASE_SECRET comune (dev).
+//   - Per ogni sender usiamo HKDF(BASE_SECRET, "sender=<displayName>").
+//   - Questo secret alimenta WasmPeer (libreria sframe-rs via WebAssembly).
+//
+// ─────────────────────────────────────────────────────────────
 
 import { hkdf } from './hkdf.js';
+
+// ─────────────────────────────────────────────────────────────
+// 1. UI
+// ─────────────────────────────────────────────────────────────
 
 const els = {
   wsUrl: document.getElementById('wsUrl'),
   roomId: document.getElementById('roomId'),
   displayName: document.getElementById('displayName'),
+
   btnConnect: document.getElementById('btnConnect'),
   btnHangup: document.getElementById('btnHangup'),
   btnToggleMic: document.getElementById('btnToggleMic'),
   btnToggleCam: document.getElementById('btnToggleCam'),
+
   localVideo: document.getElementById('localVideo'),
   remoteVideos: document.getElementById('remoteVideos'),
+
   log: document.getElementById('log'),
+  chkSFrame: document.getElementById('chkSFrame'),
 };
 
 function log(...a) {
@@ -33,68 +65,71 @@ function setConnectedUI(connected) {
   }
 }
 
+// Log SFrame opzionale (solo se checkbox attivata)
+function logSFrame(...a) {
+  if (!els.chkSFrame || !els.chkSFrame.checked) return;
+  log(...a);
+}
+
 // ─────────────────────────────────────────────────────────────
-// SFrame config
+// 2. SFrame / Crypto layer (HKDF + WasmPeer)
 // ─────────────────────────────────────────────────────────────
 
+// KID fissati: 1=audio, 2=video
 const KID_AUDIO = 1;
 const KID_VIDEO = 2;
+
+// Secret base di sviluppo (in futuro: exporter da MLS)
 const BASE_SECRET = new TextEncoder().encode('DEV-ONLY-BASE-SECRET');
 
-// TX peer locale
+// TX peer locale (usato per cifrare i frame che inviamo)
 let txPeer = null;
 
-// Stato Janus
-let ws = null;
-let sessionId = null;
-
-// Publisher
-let pluginHandlePub = null;
-let pcPub = null;
-let localStream = null;
-
-// Subscriber per feed:
-// { feedId, display, handleId, pc, videoEl, rxPeer }
+// Mappa feedId → subscriber info
+// sub = {
+//   feedId,
+//   display,
+//   handleId,
+//   pc,
+//   videoEl,
+//   rxPeer,   // WasmPeer per decifrare SFrame di quel feed
+// }
 const subscribers = new Map();
 
-// ─────────────────────────────────────────────────────────────
-// Helpers generali
-// ─────────────────────────────────────────────────────────────
-
-function makeTxId(prefix) {
-  return `${prefix}-${Math.random().toString(36).slice(2, 10)}`;
+/**
+ * Deriva un secret per-mittente a partire dall’etichetta logica
+ * (nel nostro caso: displayName = identity nella room).
+ *
+ * In futuro, al posto di BASE_SECRET, si userà un exporter da MLS.
+ */
+async function deriveSenderSecret(senderLabel) {
+  return hkdf(BASE_SECRET, `sender=${senderLabel}`);
 }
 
-function sendJanus(msg) {
-  if (!ws || ws.readyState !== WebSocket.OPEN) {
-    log('⚠️ WebSocket non aperto, impossibile inviare:', JSON.stringify(msg));
-    return;
-  }
-  ws.send(JSON.stringify(msg));
-}
-
-// ─────────────────────────────────────────────────────────────
-// SFrame helpers
-// ─────────────────────────────────────────────────────────────
-
+/**
+ * Inizializza il WasmPeer per TX locale, se non esiste.
+ * Ritorna true se TX SFrame è pronto, false se invieremo in chiaro.
+ */
 async function ensureTxPeerForLocal() {
   if (txPeer) return true;
   if (!window.SFRAME?.WasmPeer) {
     log('⚠️ SFRAME non pronto (WasmPeer mancante), TX in chiaro.');
     return false;
   }
-  let disp = els.displayName.value.trim();
+
+  let disp = (els.displayName.value || '').trim();
   if (!disp) {
     disp = 'user-' + Math.random().toString(36).slice(2, 8);
     els.displayName.value = disp;
   }
+
   try {
-    const secret = await hkdf(BASE_SECRET, `sender=${disp}`);
+    const secret = await deriveSenderSecret(disp);
     txPeer = new window.SFRAME.WasmPeer(
       KID_AUDIO,
       KID_VIDEO,
       null,
-      secret
+      secret,
     );
     log('Local SFrame TX peer pronto per', disp);
     return true;
@@ -106,35 +141,53 @@ async function ensureTxPeerForLocal() {
   }
 }
 
-async function ensureRxPeerForFeed(info) {
-  if (info.rxPeer) return true;
+/**
+ * Inizializza, se necessario, il WasmPeer RX per un certo feed remoto.
+ */
+async function ensureRxPeerForFeed(sub) {
+  if (sub.rxPeer) return true;
   if (!window.SFRAME?.WasmPeer) {
-    log(`⚠️ SFRAME non pronto (RX), feed=${info.feedId}, RX in chiaro.`);
+    log(`⚠️ SFRAME non pronto (RX), feed=${sub.feedId}, RX in chiaro.`);
     return false;
   }
-  const label = info.display || String(info.feedId);
+
+  const label = sub.display || String(sub.feedId);
   try {
-    const secret = await hkdf(BASE_SECRET, `sender=${label}`);
-    info.rxPeer = window.SFRAME.WasmPeer.new_full_duplex(
-      99, 98,          // tx dummy
+    const secret = await deriveSenderSecret(label);
+    sub.rxPeer = window.SFRAME.WasmPeer.new_full_duplex(
+      99, 98,             // TX dummy
       KID_AUDIO,
       KID_VIDEO,
       null,
-      secret
+      secret,
     );
-    log(`SFrame RX peer pronto per feed=${info.feedId} (${label})`);
+    log(`SFrame RX peer pronto per feed=${sub.feedId} (${label})`);
     return true;
   } catch (e) {
     console.error('ensureRxPeerForFeed err', e);
-    log(`⚠️ Errore inizializzazione RX peer per feed=${info.feedId}, RX in chiaro.`);
-    info.rxPeer = null;
+    log(`⚠️ Errore inizializzazione RX peer per feed=${sub.feedId}, RX in chiaro.`);
+    sub.rxPeer = null;
     return false;
   }
 }
 
 // ─────────────────────────────────────────────────────────────
-// Encoded transforms – TX
+// 3. WebRTC layer (RTCPeerConnection + Insertable Streams)
 // ─────────────────────────────────────────────────────────────
+
+// Stato Janus / WebRTC per il publisher (noi)
+let ws = null;
+let sessionId = null;
+let pluginHandlePub = null;
+let pcPub = null;
+let localStream = null;
+
+// Helpers vari
+function makeTxId(prefix) {
+  return `${prefix}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+// ===== TX: attach transform su RTCRtpSender =====
 
 function attachSenderTransform(sender, kind) {
   if (!sender) {
@@ -175,10 +228,11 @@ function attachSenderTransform(sender, kind) {
           outU8 = txPeer.encrypt_video(inU8);
         }
 
+        // Log opzionale header SFrame TX
         if (window.SFRAME.inspect && Math.random() * 20 < 1) {
           try {
             const info = window.SFRAME.inspect(outU8);
-            log(`[TX/${kind}] ${info}`);
+            logSFrame(`[TX/${kind}] ${info}`);
           } catch {}
         }
 
@@ -188,7 +242,7 @@ function attachSenderTransform(sender, kind) {
         console.warn('encrypt err', e);
         controller.enqueue(chunk);
       }
-    }
+    },
   });
 
   readable.pipeThrough(transform).pipeTo(writable).catch(e => {
@@ -196,17 +250,15 @@ function attachSenderTransform(sender, kind) {
   });
 }
 
-// ─────────────────────────────────────────────────────────────
-// Encoded transforms – RX (attach sui receiver reali)
-// ─────────────────────────────────────────────────────────────
+// ===== RX: attach transform su RTCRtpReceiver =====
 
-function attachReceiverTransform(receiver, kind, info) {
+function attachReceiverTransform(receiver, kind, sub) {
   if (!receiver) {
-    log('attachReceiverTransform: receiver mancante per', kind, 'feed=', info.feedId);
+    log('attachReceiverTransform: receiver mancante per', kind, 'feed=', sub.feedId);
     return;
   }
   if (typeof receiver.createEncodedStreams !== 'function') {
-    log('⚠️ receiver.createEncodedStreams non disponibile per ' + kind + ' feed=' + info.feedId);
+    log('⚠️ receiver.createEncodedStreams non disponibile per ' + kind + ' feed=' + sub.feedId);
     return;
   }
 
@@ -214,36 +266,37 @@ function attachReceiverTransform(receiver, kind, info) {
   try {
     streams = receiver.createEncodedStreams();
   } catch (e) {
-    log('⚠️ createEncodedStreams(RX) ha lanciato su ' + kind + ' feed=' + info.feedId + ': ' + (e.message || e));
+    log('⚠️ createEncodedStreams(RX) ha lanciato su ' + kind + ' feed=' + sub.feedId + ': ' + (e.message || e));
     console.warn('createEncodedStreams receiver error', e);
     return;
   }
 
   const { readable, writable } = streams;
-  log('Encoded transform RX attaccato su', kind, 'feed=', info.feedId);
+  log('Encoded transform RX attaccato su', kind, 'feed=', sub.feedId);
 
   const transform = new TransformStream({
     transform(chunk, controller) {
       try {
-        if (!info.rxPeer || !window.SFRAME) {
+        if (!sub.rxPeer || !window.SFRAME) {
           controller.enqueue(chunk);
           return;
         }
 
         const inU8 = new Uint8Array(chunk.data);
 
+        // Log opzionale header SFrame RX
         if (window.SFRAME.inspect && Math.random() * 20 < 1) {
           try {
             const hdrInfo = window.SFRAME.inspect(inU8);
-            log(`[RX/${kind} feed=${info.feedId}] ${hdrInfo}`);
+            logSFrame(`[RX/${kind} feed=${sub.feedId}] ${hdrInfo}`);
           } catch {}
         }
 
         let outU8;
         if (kind === 'audio') {
-          outU8 = info.rxPeer.decrypt_audio(inU8);
+          outU8 = sub.rxPeer.decrypt_audio(inU8);
         } else {
-          outU8 = info.rxPeer.decrypt_video(inU8);
+          outU8 = sub.rxPeer.decrypt_video(inU8);
         }
 
         chunk.data = outU8.buffer;
@@ -252,7 +305,7 @@ function attachReceiverTransform(receiver, kind, info) {
         console.warn('decrypt err', e);
         controller.enqueue(chunk);
       }
-    }
+    },
   });
 
   readable.pipeThrough(transform).pipeTo(writable).catch(e => {
@@ -261,8 +314,16 @@ function attachReceiverTransform(receiver, kind, info) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// Gestione messaggi Janus
+// 4. Janus SFU layer (VideoRoom plugin via WebSocket)
 // ─────────────────────────────────────────────────────────────
+
+function sendJanus(msg) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    log('⚠️ WebSocket non aperto, impossibile inviare:', JSON.stringify(msg));
+    return;
+  }
+  ws.send(JSON.stringify(msg));
+}
 
 function onJanusMessage(evt) {
   let msg;
@@ -290,28 +351,41 @@ function onJanusMessage(evt) {
   }
 }
 
+// ===== success (create / attach) =====
+
 function handleJanusSuccess(msg) {
   const { transaction, data } = msg;
 
+  // Session create
   if (transaction && transaction.startsWith('create-')) {
     sessionId = data.id;
     log('Session ID:', sessionId);
     attachPublisherHandle();
-  } else if (transaction && transaction.startsWith('attach-pub-')) {
+    return;
+  }
+
+  // Attach publisher handle
+  if (transaction && transaction.startsWith('attach-pub-')) {
     pluginHandlePub = data.id;
     log('Publisher handle ID:', pluginHandlePub);
     joinAsPublisher();
-  } else if (transaction && transaction.startsWith('attach-sub-')) {
+    return;
+  }
+
+  // Attach subscriber handle (uno per feed)
+  if (transaction && transaction.startsWith('attach-sub-')) {
     const feedIdStr = transaction.split('attach-sub-')[1];
     const feedId = Number(feedIdStr);
-    const info = subscribers.get(feedId);
-    if (info) {
-      info.handleId = data.id;
-      log(`Subscriber handle per feed ${feedId}:`, info.handleId);
-      joinAsSubscriber(feedId, info.handleId);
+    const sub = subscribers.get(feedId);
+    if (sub) {
+      sub.handleId = data.id;
+      log(`Subscriber handle per feed ${feedId}:`, sub.handleId);
+      joinAsSubscriber(feedId, sub.handleId);
     }
   }
 }
+
+// ===== event (VideoRoom plugin) =====
 
 function handleJanusEvent(msg) {
   const sender = msg.sender;
@@ -324,23 +398,30 @@ function handleJanusEvent(msg) {
   const data = plugindata.data || {};
   const vr = data.videoroom;
 
+  // Eventi relativi al nostro handle publisher
   if (sender === pluginHandlePub) {
     if (vr === 'joined') {
       log('✅ Joined room come publisher. ID interno:', data.id);
+
       if (Array.isArray(data.publishers)) {
-        log('Publisher già presenti:', data.publishers.map(p => p.display || p.id).join(', ') || '(nessuno)');
+        log(
+          'Publisher già presenti:',
+          data.publishers.map(p => p.display || p.id).join(', ') || '(nessuno)',
+        );
         data.publishers.forEach(p => {
           subscribeToPublisher(p.id, p.display);
         });
       }
       startPublishing();
     } else if (vr === 'event') {
+      // Nuovi publisher nella room
       if (Array.isArray(data.publishers)) {
         data.publishers.forEach(p => {
           log('Nuovo publisher nella room:', p.display || p.id);
           subscribeToPublisher(p.id, p.display);
         });
       }
+      // Publisher che abbandonano
       if (data.unpublished) {
         const feed = data.unpublished;
         log('Publisher rimosso:', feed);
@@ -358,27 +439,31 @@ function handleJanusEvent(msg) {
     return;
   }
 
-  for (const [feedId, info] of subscribers.entries()) {
-    if (info.handleId === sender) {
+  // Eventi relativi agli handle subscriber (feed remoti)
+  for (const [feedId, sub] of subscribers.entries()) {
+    if (sub.handleId === sender) {
       if (vr === 'attached') {
         log(`Subscriber attached per feed ${feedId}`);
       }
       if (jsep) {
-        handleSubscriberJsep(feedId, info, jsep);
+        handleSubscriberJsep(feedId, sub, jsep);
       }
       break;
     }
   }
 }
 
+// ===== trickle ICE (dal server) =====
+
 function handleJanusTrickle(msg) {
   const c = msg.candidate;
   if (!c) return;
-  // Per semplicità ignoriamo le trickle da Janus (spesso bastano quelle via JSEP).
+  // Per semplicità ignoriamo le trickle da Janus:
+  // normalmente le trickle inviate da noi bastano per unirsi.
 }
 
 // ─────────────────────────────────────────────────────────────
-// Publisher
+// Publisher (noi) su VideoRoom
 // ─────────────────────────────────────────────────────────────
 
 function attachPublisherHandle() {
@@ -393,7 +478,7 @@ function attachPublisherHandle() {
 
 function joinAsPublisher() {
   const room = Number(els.roomId.value) || 1234;
-  let disp = els.displayName.value.trim();
+  let disp = (els.displayName.value || '').trim();
   if (!disp) {
     disp = 'user-' + Math.random().toString(36).slice(2, 8);
     els.displayName.value = disp;
@@ -421,7 +506,7 @@ async function startPublishing() {
 
     pcPub = new RTCPeerConnection({ iceServers: [] });
 
-    pcPub.onicecandidate = (ev) => {
+    pcPub.onicecandidate = ev => {
       if (!ev.candidate) {
         sendJanus({
           janus: 'trickle',
@@ -450,6 +535,7 @@ async function startPublishing() {
       log('⚠️ SFrame TX non attivo: invieremo in chiaro (solo SRTP).');
     }
 
+    // Media locale
     localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
     els.localVideo.srcObject = localStream;
 
@@ -458,14 +544,14 @@ async function startPublishing() {
 
     const audioTrack = localStream.getAudioTracks()[0];
     if (audioTrack) {
-      const sender = pcPub.addTrack(audioTrack, localStream);
-      if (sframeOk) attachSenderTransform(sender, 'audio');
+      const senderA = pcPub.addTrack(audioTrack, localStream);
+      if (sframeOk) attachSenderTransform(senderA, 'audio');
     }
 
     const videoTrack = localStream.getVideoTracks()[0];
     if (videoTrack) {
-      const sender = pcPub.addTrack(videoTrack, localStream);
-      if (sframeOk) attachSenderTransform(sender, 'video');
+      const senderV = pcPub.addTrack(videoTrack, localStream);
+      if (sframeOk) attachSenderTransform(senderV, 'video');
     }
 
     const offer = await pcPub.createOffer();
@@ -485,7 +571,6 @@ async function startPublishing() {
     });
 
     log('Offer inviato per publish');
-
   } catch (e) {
     console.error('startPublishing err', e);
     log('❌ startPublishing err:', e.message || e);
@@ -493,14 +578,13 @@ async function startPublishing() {
 }
 
 // ─────────────────────────────────────────────────────────────
-// Subscriber
+// Subscriber per ogni feed remoto
 // ─────────────────────────────────────────────────────────────
 
 function subscribeToPublisher(feedId, display) {
-  if (subscribers.has(feedId)) {
-    return;
-  }
-  const info = {
+  if (subscribers.has(feedId)) return;
+
+  const sub = {
     feedId,
     display: display || String(feedId),
     handleId: null,
@@ -508,7 +592,7 @@ function subscribeToPublisher(feedId, display) {
     videoEl: null,
     rxPeer: null,
   };
-  subscribers.set(feedId, info);
+  subscribers.set(feedId, sub);
 
   const tx = `attach-sub-${feedId}`;
   sendJanus({
@@ -537,20 +621,20 @@ function joinAsSubscriber(feedId, handleId) {
   });
 }
 
-async function handleSubscriberJsep(feedId, info, jsep) {
+async function handleSubscriberJsep(feedId, sub, jsep) {
   try {
     log(`JSEP (offer) per subscriber feed=${feedId}, creo answer`);
 
-    if (!info.pc) {
+    if (!sub.pc) {
       const pc = new RTCPeerConnection({ iceServers: [] });
 
-      pc.onicecandidate = (ev) => {
+      pc.onicecandidate = ev => {
         if (!ev.candidate) {
           sendJanus({
             janus: 'trickle',
             transaction: makeTxId(`trickle-end-sub-${feedId}`),
             session_id: sessionId,
-            handle_id: info.handleId,
+            handle_id: sub.handleId,
             candidate: { completed: true },
           });
           return;
@@ -559,18 +643,21 @@ async function handleSubscriberJsep(feedId, info, jsep) {
           janus: 'trickle',
           transaction: makeTxId(`trickle-sub-${feedId}`),
           session_id: sessionId,
-          handle_id: info.handleId,
+          handle_id: sub.handleId,
           candidate: ev.candidate,
         });
       };
 
-      pc.ontrack = (ev) => {
+      pc.ontrack = ev => {
         log(`Remote track per feed=${feedId}, kind=${ev.track.kind}`);
-        if (!info.videoEl) {
+
+        if (!sub.videoEl) {
           const box = document.createElement('div');
           box.className = 'remoteBox';
+
           const label = document.createElement('label');
-          label.textContent = `Feed ${feedId} (${info.display})`;
+          label.textContent = `Feed ${feedId} (${sub.display})`;
+
           const vid = document.createElement('video');
           vid.autoplay = true;
           vid.playsInline = true;
@@ -579,10 +666,10 @@ async function handleSubscriberJsep(feedId, info, jsep) {
           box.appendChild(vid);
           els.remoteVideos.appendChild(box);
 
-          info.videoEl = vid;
+          sub.videoEl = vid;
         }
-        if (!info.videoEl.srcObject && ev.streams[0]) {
-          info.videoEl.srcObject = ev.streams[0];
+        if (!sub.videoEl.srcObject && ev.streams[0]) {
+          sub.videoEl.srcObject = ev.streams[0];
         }
       };
 
@@ -590,32 +677,33 @@ async function handleSubscriberJsep(feedId, info, jsep) {
         log(`pcSub[${feedId}] ICE state:`, pc.iceConnectionState);
       };
 
-      info.pc = pc;
+      sub.pc = pc;
     }
 
-    await info.pc.setRemoteDescription(new RTCSessionDescription(jsep));
+    // Set remote SDP da Janus
+    await sub.pc.setRemoteDescription(new RTCSessionDescription(jsep));
 
-    // Assicuriamo l'RX peer SFrame per questo feed
-    await ensureRxPeerForFeed(info);
+    // Assicuriamo SFrame RX per questo feed
+    await ensureRxPeerForFeed(sub);
 
-    // Ora agganciamo i transform RX ai receiver REALI (audio/video)
-    const receivers = info.pc.getReceivers();
+    // Agganciamo i transform RX ai receiver reali (audio+video)
+    const receivers = sub.pc.getReceivers();
     for (const r of receivers) {
       if (r.track && r.track.kind === 'audio') {
-        attachReceiverTransform(r, 'audio', info);
+        attachReceiverTransform(r, 'audio', sub);
       } else if (r.track && r.track.kind === 'video') {
-        attachReceiverTransform(r, 'video', info);
+        attachReceiverTransform(r, 'video', sub);
       }
     }
 
-    const answer = await info.pc.createAnswer();
-    await info.pc.setLocalDescription(answer);
+    const answer = await sub.pc.createAnswer();
+    await sub.pc.setLocalDescription(answer);
 
     sendJanus({
       janus: 'message',
       transaction: makeTxId(`start-sub-${feedId}`),
       session_id: sessionId,
-      handle_id: info.handleId,
+      handle_id: sub.handleId,
       body: {
         request: 'start',
         room: Number(els.roomId.value) || 1234,
@@ -624,7 +712,6 @@ async function handleSubscriberJsep(feedId, info, jsep) {
     });
 
     log(`Answer inviato per subscriber feed ${feedId}`);
-
   } catch (e) {
     console.error('handleSubscriberJsep err', e);
     log(`❌ handleSubscriberJsep err (feed=${feedId}):`, e.message || e);
@@ -632,18 +719,18 @@ async function handleSubscriberJsep(feedId, info, jsep) {
 }
 
 function removeSubscriber(feedId) {
-  const info = subscribers.get(feedId);
-  if (!info) return;
+  const sub = subscribers.get(feedId);
+  if (!sub) return;
 
-  if (info.pc) {
-    try { info.pc.close(); } catch {}
-    info.pc = null;
+  if (sub.pc) {
+    try { sub.pc.close(); } catch {}
+    sub.pc = null;
   }
-  if (info.videoEl && info.videoEl.parentNode) {
-    info.videoEl.parentNode.remove();
+  if (sub.videoEl && sub.videoEl.parentNode) {
+    sub.videoEl.parentNode.remove();
   }
-  if (info.rxPeer && info.rxPeer.free) {
-    try { info.rxPeer.free(); } catch {}
+  if (sub.rxPeer && sub.rxPeer.free) {
+    try { sub.rxPeer.free(); } catch {}
   }
 
   subscribers.delete(feedId);
@@ -659,7 +746,7 @@ function connectAndJoinRoom() {
     return;
   }
 
-  const url = els.wsUrl.value.trim() || 'ws://localhost:8188/';
+  const url = (els.wsUrl.value || '').trim() || 'ws://localhost:8188/';
   log('Connessione a Janus WS:', url);
 
   ws = new WebSocket(url, 'janus-protocol');
@@ -675,12 +762,12 @@ function connectAndJoinRoom() {
 
   ws.onmessage = onJanusMessage;
 
-  ws.onclose = (ev) => {
+  ws.onclose = ev => {
     log(`WS chiuso (code=${ev.code}, reason=${ev.reason || 'n/a'})`);
     cleanup();
   };
 
-  ws.onerror = (e) => {
+  ws.onerror = e => {
     console.error('WS error', e);
     log('WS error (vedi console per dettagli)');
   };
@@ -719,12 +806,12 @@ function cleanup() {
   localStream = null;
   els.localVideo.srcObject = null;
 
-  for (const [feedId, info] of subscribers) {
-    if (info.pc) {
-      try { info.pc.close(); } catch {}
+  for (const [feedId, sub] of subscribers) {
+    if (sub.pc) {
+      try { sub.pc.close(); } catch {}
     }
-    if (info.rxPeer && info.rxPeer.free) {
-      try { info.rxPeer.free(); } catch {}
+    if (sub.rxPeer && sub.rxPeer.free) {
+      try { sub.rxPeer.free(); } catch {}
     }
   }
   subscribers.clear();
@@ -742,7 +829,7 @@ function cleanup() {
 }
 
 // ─────────────────────────────────────────────────────────────
-// Mic / Cam
+// Mic / Cam toggle (su stream locale)
 // ─────────────────────────────────────────────────────────────
 
 function toggleMic() {
