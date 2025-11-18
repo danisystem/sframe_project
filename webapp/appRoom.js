@@ -10,19 +10,6 @@
 //   3. WebRTC       : RTCPeerConnection (publisher/subscriber)
 //   4. Janus SFU    : signaling via WebSocket (VideoRoom plugin)
 //
-// Il flusso:
-//
-//   - Ogni client entra nella room Janus come PUBLISHER (audio+video).
-//   - Janus annuncia gli altri publisher (feedId, display).
-//   - Per ogni feed remoto creiamo un SUBSCRIBER (RTCPeerConnection).
-//   - SFrame cripta i nostri frame (TX) e decripta quelli remoti (RX).
-//
-// Le chiavi:
-//
-//   - C’è un BASE_SECRET comune (dev).
-//   - Per ogni sender usiamo HKDF(BASE_SECRET, "sender=<displayName>").
-//   - Questo secret alimenta WasmPeer (libreria sframe-rs via WebAssembly).
-//
 // ─────────────────────────────────────────────────────────────
 
 import { hkdf } from './hkdf.js';
@@ -181,6 +168,34 @@ let sessionId = null;
 let pluginHandlePub = null;
 let pcPub = null;
 let localStream = null;
+
+// Keepalive verso Janus
+let keepaliveTimer = null;
+
+function startKeepalive() {
+  if (!sessionId || !ws || ws.readyState !== WebSocket.OPEN) return;
+  if (keepaliveTimer) return;
+
+  keepaliveTimer = setInterval(() => {
+    if (!sessionId || !ws || ws.readyState !== WebSocket.OPEN) {
+      clearInterval(keepaliveTimer);
+      keepaliveTimer = null;
+      return;
+    }
+    sendJanus({
+      janus: 'keepalive',
+      transaction: makeTxId('keepalive'),
+      session_id: sessionId,
+    });
+  }, 25_000); // ogni 25s
+}
+
+function stopKeepalive() {
+  if (keepaliveTimer) {
+    clearInterval(keepaliveTimer);
+    keepaliveTimer = null;
+  }
+}
 
 // Helpers vari
 function makeTxId(prefix) {
@@ -360,6 +375,7 @@ function handleJanusSuccess(msg) {
   if (transaction && transaction.startsWith('create-')) {
     sessionId = data.id;
     log('Session ID:', sessionId);
+    startKeepalive();            // ← keepalive dopo creazione sessione
     attachPublisherHandle();
     return;
   }
@@ -458,8 +474,7 @@ function handleJanusEvent(msg) {
 function handleJanusTrickle(msg) {
   const c = msg.candidate;
   if (!c) return;
-  // Per semplicità ignoriamo le trickle da Janus:
-  // normalmente le trickle inviate da noi bastano per unirsi.
+  // Per semplicità, in questa demo ignoriamo le trickle da Janus.
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -535,8 +550,19 @@ async function startPublishing() {
       log('⚠️ SFrame TX non attivo: invieremo in chiaro (solo SRTP).');
     }
 
-    // Media locale
-    localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
+    // Media locale con vincoli più leggeri (meno lag)
+    localStream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+      },
+      video: {
+        width:  { ideal: 640, max: 640 },
+        height: { ideal: 360, max: 360 },
+        frameRate: { ideal: 20, max: 25 },
+      },
+    });
+
     els.localVideo.srcObject = localStream;
 
     els.btnToggleMic.textContent = 'Mic OFF';
@@ -566,6 +592,9 @@ async function startPublishing() {
         request: 'publish',
         audio: true,
         video: true,
+        // bitrate desiderato (bps) – 800 kbps
+        bitrate: 800_000,
+        bitrate_cap: true,
       },
       jsep: offer,
     });
@@ -795,6 +824,8 @@ function hangup() {
 }
 
 function cleanup() {
+  stopKeepalive();
+
   if (pcPub) {
     try { pcPub.close(); } catch {}
   }
