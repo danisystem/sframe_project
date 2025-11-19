@@ -6,6 +6,8 @@ use std::net::TcpStream;
 use anyhow::{anyhow, Result};
 use openmls::prelude::*;
 use openmls_rust_crypto::OpenMlsRustCrypto;
+use openmls_basic_credential::SignatureKeyPair;
+
 
 /// Segreti MLS che useremo come base per SFrame
 #[derive(Debug, Clone)]
@@ -65,7 +67,8 @@ fn mls_generate_keys() -> Result<MlsSessionKeys> {
         credential_with_key,
     )?;
 
-    let epoch_u64 = u64::from(group.epoch());
+    // Epoch come u64
+    let epoch_u64 = group.epoch().as_u64();
 
     // Segreti derivati dal master secret di gruppo
     let audio = group

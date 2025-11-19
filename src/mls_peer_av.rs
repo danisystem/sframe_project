@@ -17,10 +17,7 @@ use nokhwa::pixel_format::RgbFormat;
 use nokhwa::utils::{ApiBackend, CameraFormat, CameraIndex, FrameFormat, RequestedFormat, RequestedFormatType};
 use nokhwa::{query, Camera};
 
-use sframe::{CipherSuite, mls::{MlsKeyId, MlsKeyIdBitRange}};
-
-use sha2::{Sha256, Digest};
-
+use sframe::CipherSuite;
 
 mod sender;
 mod receiver;
@@ -29,50 +26,12 @@ mod mls_peer_output;          // <── nuovo modulo su file separato
 use sender::Sender;
 use receiver::Receiver;
 use mls_peer_output as output; // alias per chiamare output::...
+mod mls_session; 
+use mls_session::{server_handshake, client_handshake};
 
 /* ───────────── Framing ───────────── */
 const SID_VIDEO: u8 = 0x01;
 const SID_AUDIO: u8 = 0x02;
-
-/* ───────────── MLS → SFrame context (stub per ora) ───────────── */
-
-struct SframeContext {
-    epoch: u64,
-    audio_key: Vec<u8>,
-    video_key: Vec<u8>,
-    is_server: bool,
-}
-
-fn make_kid(context_id: u64, epoch: u64, member_index: u64) -> MlsKeyId {
-    let bit_range = MlsKeyIdBitRange::new(8, 8);
-    MlsKeyId::new(context_id, epoch, member_index, bit_range)
-}
-
-fn hkdf_like(master: &[u8], label: &[u8], len: usize) -> Vec<u8> {
-    let mut hasher = Sha256::new();
-    hasher.update(master);
-    hasher.update(label);
-    let digest = hasher.finalize();
-    let mut out = vec![0u8; len];
-    let n = len.min(digest.len());
-    out[..n].copy_from_slice(&digest[..n]);
-    out
-}
-
-fn mls_handshake_stub(_stream: &mut TcpStream, is_server: bool) -> Result<SframeContext> {
-    const MASTER_SECRET: &[u8] = b"demo-mls-master-secret-sframe";
-    let epoch: u64 = 0;
-
-    let audio_key = hkdf_like(MASTER_SECRET, b"SFRAME_AUDIO", 32);
-    let video_key = hkdf_like(MASTER_SECRET, b"SFRAME_VIDEO", 32);
-
-    Ok(SframeContext {
-        epoch,
-        audio_key,
-        video_key,
-        is_server,
-    })
-}
 
 /* ───────────── Framing TCP ───────────── */
 
@@ -236,7 +195,7 @@ fn main() -> Result<()> {
             let req = RequestedFormat::new::<RgbFormat>(RequestedFormatType::None);
             match Camera::new(CameraIndex::Index(i as u32), req) {
                 Ok(mut cam) => match cam.compatible_camera_formats() {
-                    Ok(mut fmts) => {
+                    Ok(fmts) => {
                         let mut fmts2 = fmts.clone();
                         if prefer_mjpeg {
                             let only: Vec<_> = fmts2.iter().cloned()
@@ -289,56 +248,49 @@ fn main() -> Result<()> {
     let mut stream_read = base_stream;
     let stream_write = Arc::new(Mutex::new(stream_read.try_clone()?));
 
-    /* ───── MLS stub → chiavi + epoch + ruolo ───── */
-    let sframe_ctx = mls_handshake_stub(&mut stream_read, is_server)?;
+    /* ───── Handshake reale con OpenMLS (mls_session.rs) ───── */
+
+    let (mls_keys, kids) = if is_server {
+        server_handshake(&mut stream_read)?
+    } else {
+        client_handshake(&mut stream_read)?
+    };
+
     println!(
-        "[MLS-stub] epoch = {}, is_server = {}, audio_key_len = {}, video_key_len = {}",
-        sframe_ctx.epoch,
-        sframe_ctx.is_server,
-        sframe_ctx.audio_key.len(),
-        sframe_ctx.video_key.len()
+        "[MLS] epoch = {}, base_kid = {}, audio_len = {}, video_len = {}",
+        mls_keys.epoch,
+        mls_keys.audio_secret.len(),
+        mls_keys.video_secret.len(),
+        mls_keys.base_kid,
+    );
+
+    println!(
+        "[MLS] KID mapping → send_aud={}, send_vid={}, recv_aud={}, recv_vid={}",
+        kids.send_aud, kids.send_vid, kids.recv_aud, kids.recv_vid
     );
 
     /* ───── SFrame Sender/Receiver ───── */
 
-    let epoch = sframe_ctx.epoch;
+    // Sender (usa i KID calcolati da MLS + KID seed)
+    let mut s_audio = Sender::with_cipher_suite(kids.send_aud, suite);
+    s_audio.set_encryption_key(&mls_keys.audio_secret)?;
 
-    let (ka_send, kv_send, ka_recv, kv_recv) = if is_server {
-        (
-            make_kid(0, epoch, 0),
-            make_kid(1, epoch, 0),
-            make_kid(0, epoch, 1),
-            make_kid(1, epoch, 1),
-        )
-    } else {
-        (
-            make_kid(0, epoch, 1),
-            make_kid(1, epoch, 1),
-            make_kid(0, epoch, 0),
-            make_kid(1, epoch, 0),
-        )
-    };
+    let mut s_video = Sender::with_cipher_suite(kids.send_vid, suite);
+    s_video.set_encryption_key(&mls_keys.video_secret)?;
 
-    println!(
-        "[SFrame] KID mapping → send_aud = {:?}, send_vid = {:?}, recv_aud = {:?}, recv_vid = {:?}",
-        ka_send, kv_send, ka_recv, kv_recv
-    );
-
-    let mut s_audio = Sender::with_cipher_suite(ka_send, suite);
-    s_audio.set_encryption_key(&sframe_ctx.audio_key)?;
-    let mut s_video = Sender::with_cipher_suite(kv_send, suite);
-    s_video.set_encryption_key(&sframe_ctx.video_key)?;
-
+    // Receiver (usa i KID opposti + stesse chiavi)
     let mut r_audio = Receiver::from(receiver::ReceiverOptions {
         cipher_suite: suite,
         n_ratchet_bits: None,
     });
-    r_audio.set_encryption_key(ka_recv, &sframe_ctx.audio_key)?;
+    r_audio.set_encryption_key(kids.recv_aud, &mls_keys.audio_secret)?;
+
     let mut r_video = Receiver::from(receiver::ReceiverOptions {
         cipher_suite: suite,
         n_ratchet_bits: None,
     });
-    r_video.set_encryption_key(kv_recv, &sframe_ctx.video_key)?;
+    r_video.set_encryption_key(kids.recv_vid, &mls_keys.video_secret)?;
+
 
     /* ───── AUDIO OUTPUT (RX) ───── */
 
