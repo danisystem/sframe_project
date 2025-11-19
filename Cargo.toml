@@ -39,6 +39,7 @@ log = "0.4"
 clap = { version = "4", features = ["derive"] }
 crossbeam-channel = "0.5"
 hex = "0.4.3"
+sha2 = "0.10"
 
 # RNG compatibile anche su Web (getrandom usa WebCrypto su wasm32)
 getrandom = { version = "0.2", features = ["js"] }
@@ -58,6 +59,12 @@ softbuffer  = { version = "0.3", optional = true }
 nokhwa      = { version = "0.10.9", default-features = false, features = ["input-native"], optional = true }
 ctrlc       = { version = "3", optional = true }
 simple_logger = { version = "5", optional = true }
+
+openmls = "0.7"
+openmls_rust_crypto = "0.4"
+openmls_basic_credential = "0.4"
+env_logger = "0.11"
+tls_codec = "0.4"
 
 # ── Dipendenze SOLO per wasm ───────────────────────────────────────────────────
 [target.'cfg(target_arch = "wasm32")'.dependencies]
@@ -95,6 +102,14 @@ path = "src/rx_av.rs"
 [[bin]]
 name = "peer_av"
 path = "src/peer_av.rs"
+
+[[bin]]
+name = "mls_peer_av"
+path = "src/mls_peer_av.rs"
+
+[[bin]]
+name = "mls_sframe_demo"
+path = "src/mls_sframe_demo.rs"
 
 [dev-dependencies]
 pretty_assertions = "1"
