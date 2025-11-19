@@ -1,16 +1,4 @@
 //! Full-duplex peer: TX (audio+video) + RX (audio+video) in un solo binario.
-//!
-//! In questa versione:
-//! - la parte A/V è la tua, lasciata il più possibile invariata;
-//! - le chiavi SFrame **non** sono più lette da CLI come `--secret`, `--key-audio`, `--key-video`;
-//! - c’è un context `SframeContext` che simula ciò che in futuro farà MLS:
-//!   • “epoch” di gruppo,
-//!   • KID diversi per direzione (send/recv) e tipo (audio/video),
-//!   • due chiavi simmetriche distinte per audio e video.
-//!
-//! Al momento usiamo una derivazione deterministica locale (HKDF-like) come _stub_.
-//! In un secondo momento sostituiremo `mls_handshake_stub()` con un vero handshake OpenMLS
-//! (KeyPackage → Welcome → StagedWelcome) riutilizzando la logica che hai già in `mls_sframe_demo`.
 
 use anyhow::Result;
 use std::{
@@ -29,23 +17,18 @@ use nokhwa::pixel_format::RgbFormat;
 use nokhwa::utils::{ApiBackend, CameraFormat, CameraIndex, FrameFormat, RequestedFormat, RequestedFormatType};
 use nokhwa::{query, Camera};
 
-use sframe::header::SframeHeader;
 use sframe::{CipherSuite, mls::{MlsKeyId, MlsKeyIdBitRange}};
-
-use winit::{
-    dpi::LogicalSize,
-    event::{ElementState, Event, KeyboardInput, VirtualKeyCode, WindowEvent},
-    event_loop::{ControlFlow, EventLoop},
-    window::WindowBuilder,
-};
-use pixels::{Pixels, SurfaceTexture};
 
 use sha2::{Sha256, Digest};
 
+
 mod sender;
 mod receiver;
+mod mls_peer_output;          // <── nuovo modulo su file separato
+
 use sender::Sender;
 use receiver::Receiver;
+use mls_peer_output as output; // alias per chiamare output::...
 
 /* ───────────── Framing ───────────── */
 const SID_VIDEO: u8 = 0x01;
@@ -53,36 +36,18 @@ const SID_AUDIO: u8 = 0x02;
 
 /* ───────────── MLS → SFrame context (stub per ora) ───────────── */
 
-/// Informazioni che in futuro arriveranno da MLS:
-/// - epoch di gruppo
-/// - chiavi simmetriche audio/video
-/// - mapping per KID.
 struct SframeContext {
     epoch: u64,
-    /// chiave simmetrica per l’audio (es. 32 byte per AES-GCM-256)
     audio_key: Vec<u8>,
-    /// chiave simmetrica per il video
     video_key: Vec<u8>,
-    /// vero se questo peer è il lato `--bind` (server)
     is_server: bool,
 }
 
-/// Costruisce un MlsKeyId a partire da:
-/// - context_id (0 = audio, 1 = video)
-/// - epoch MLS
-/// - member_index (0 = server, 1 = client)
-///
-/// Usiamo 8 bit per epoch e 8 per index, configurati in `MlsKeyIdBitRange`.
 fn make_kid(context_id: u64, epoch: u64, member_index: u64) -> MlsKeyId {
-    let bit_range = MlsKeyIdBitRange::new(
-        /* n_epoch_bits */ 8,
-        /* n_index_bits */ 8,
-    );
+    let bit_range = MlsKeyIdBitRange::new(8, 8);
     MlsKeyId::new(context_id, epoch, member_index, bit_range)
 }
 
-/// Piccolo HKDF “casalingo” solo per la demo:
-/// prendi una “master secret” e un label diverso, fai SHA-256(master || label) e usa i primi `len` byte.
 fn hkdf_like(master: &[u8], label: &[u8], len: usize) -> Vec<u8> {
     let mut hasher = Sha256::new();
     hasher.update(master);
@@ -94,28 +59,10 @@ fn hkdf_like(master: &[u8], label: &[u8], len: usize) -> Vec<u8> {
     out
 }
 
-/// Stub che simula un “MLS handshake” punto-punto.
-///
-/// Per ora:
-/// - usa una pre-master segreta fissa ma *condivisa* fra i due peer (hard-codata);
-/// - deriva due chiavi simmetriche (audio/video) in modo deterministico;
-/// - imposta epoch = 0 in entrambe le parti;
-/// - decide `is_server` in base al fatto che tu abbia usato `--bind` o `--connect`.
-///
-/// In futuro:
-/// - questo verrà sostituito con:
-///   • OpenMLS (KeyPackage → Welcome → StagedWelcome),
-///   • `group.export_secret()` per ottenere il master segreto MLS,
-///   • e da lì derivare audio/video.
 fn mls_handshake_stub(_stream: &mut TcpStream, is_server: bool) -> Result<SframeContext> {
-    // In una vera sessione MLS questo sarebbe il segreto di gruppo exportato da MLS.
-    // Qui lo simuliamo con una costante condivisa fra i due peer.
     const MASTER_SECRET: &[u8] = b"demo-mls-master-secret-sframe";
-
-    // Epoch iniziale 0: quando faremo add/remove MLS, l’epoch aumenterà.
     let epoch: u64 = 0;
 
-    // Deriva chiave audio e video da MASTER_SECRET con label diverse.
     let audio_key = hkdf_like(MASTER_SECRET, b"SFRAME_AUDIO", 32);
     let video_key = hkdf_like(MASTER_SECRET, b"SFRAME_VIDEO", 32);
 
@@ -150,20 +97,6 @@ fn recv_frame<'a>(s: &mut TcpStream, buf: &'a mut Vec<u8>) -> std::io::Result<(u
     buf.resize(len as usize, 0);
     s.read_exact(buf)?;
     Ok((sid[0], &buf[..]))
-}
-
-/* ───────────── Inspect ───────────── */
-
-fn inspect_packet_compact(prefix: &str, packet: &[u8]) {
-    if let Ok(h) = SframeHeader::deserialize(packet) {
-        let hdr = h.len();
-        let body = packet.len().saturating_sub(hdr);
-        let (ct, tag) = if body >= 16 { (body - 16, 16) } else { (body, 0) };
-        println!(
-            "{prefix} kid={} ctr={} | aad={}B ct={}B tag={}B total={}B",
-            h.key_id(), h.counter(), hdr, ct, tag, packet.len()
-        );
-    }
 }
 
 /* ───────────── Helpers CLI ───────────── */
@@ -225,7 +158,7 @@ fn pick_best_format(formats: &[CameraFormat], want_w: u32, want_h: u32, want_fps
     best.map(|(bf,_)| bf)
 }
 
-/* ───── Audio helpers: remix canali e resampling lineare ───── */
+/* ───── Audio helpers ───── */
 
 fn remix_channels_i16(input: &[i16], src_ch: usize, dst_ch: usize) -> Vec<i16> {
     if src_ch == dst_ch { return input.to_vec(); }
@@ -273,8 +206,6 @@ fn resample_linear_i16(input: &[i16], src_sr: u32, dst_sr: u32, ch: usize) -> Ve
 /* ───────────── Main ───────────── */
 
 fn main() -> Result<()> {
-    // CLI unificata:
-    //   mls_peer_av --bind <PORT> | --connect <HOST:PORT>
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 3 || has_flag(&args, "--help") {
         eprintln!("Uso: mls_peer_av --bind <PORT> | --connect <HOST:PORT> \
@@ -306,18 +237,19 @@ fn main() -> Result<()> {
             match Camera::new(CameraIndex::Index(i as u32), req) {
                 Ok(mut cam) => match cam.compatible_camera_formats() {
                     Ok(mut fmts) => {
+                        let mut fmts2 = fmts.clone();
                         if prefer_mjpeg {
-                            let only: Vec<_> = fmts.iter().cloned()
+                            let only: Vec<_> = fmts2.iter().cloned()
                                 .filter(|f| matches!(f.format(), FrameFormat::MJPEG))
                                 .collect();
-                            if !only.is_empty() { fmts = only; }
+                            if !only.is_empty() { fmts2 = only; }
                         } else if prefer_nv12 {
-                            let only: Vec<_> = fmts.iter().cloned()
+                            let only: Vec<_> = fmts2.iter().cloned()
                                 .filter(|f| matches!(f.format(), FrameFormat::NV12))
                                 .collect();
-                            if !only.is_empty() { fmts = only; }
+                            if !only.is_empty() { fmts2 = only; }
                         }
-                        for f in fmts {
+                        for f in fmts2 {
                             println!(
                                 "   - {:?} {}x{} @{}fps",
                                 f.format(),
@@ -354,7 +286,6 @@ fn main() -> Result<()> {
         s
     };
 
-    // stream dedicato per RX (senza mutex) + clone per TX
     let mut stream_read = base_stream;
     let stream_write = Arc::new(Mutex::new(stream_read.try_clone()?));
 
@@ -370,42 +301,21 @@ fn main() -> Result<()> {
 
     /* ───── SFrame Sender/Receiver ───── */
 
-    // Mappiamo i KID in base a:
-    //  - context_id MLS-SFrame (0=audio, 1=video)
-    //  - epoch MLS
-    //  - ruolo (server=member_index 0, client=member_index 1)
-    //
-    // Convenzione:
-    //   - stream server→client: member_index = 0
-    //   - stream client→server: member_index = 1
-    //
-    // Quindi:
-    //   - lato server:
-    //       • send-audio  → (ctx=0, epoch, member_index=0)
-    //       • send-video  → (ctx=1, epoch, member_index=0)
-    //       • recv-audio  → (ctx=0, epoch, member_index=1)
-    //       • recv-video  → (ctx=1, epoch, member_index=1)
-    //   - lato client:
-    //       • send-audio  → (ctx=0, epoch, member_index=1)
-    //       • send-video  → (ctx=1, epoch, member_index=1)
-    //       • recv-audio  → (ctx=0, epoch, member_index=0)
-    //       • recv-video  → (ctx=1, epoch, member_index=0)
-
     let epoch = sframe_ctx.epoch;
 
     let (ka_send, kv_send, ka_recv, kv_recv) = if is_server {
         (
-            make_kid(0, epoch, 0), // server → client audio
-            make_kid(1, epoch, 0), // server → client video
-            make_kid(0, epoch, 1), // client → server audio
-            make_kid(1, epoch, 1), // client → server video
+            make_kid(0, epoch, 0),
+            make_kid(1, epoch, 0),
+            make_kid(0, epoch, 1),
+            make_kid(1, epoch, 1),
         )
     } else {
         (
-            make_kid(0, epoch, 1), // client → server audio
-            make_kid(1, epoch, 1), // client → server video
-            make_kid(0, epoch, 0), // server → client audio
-            make_kid(1, epoch, 0), // server → client video
+            make_kid(0, epoch, 1),
+            make_kid(1, epoch, 1),
+            make_kid(0, epoch, 0),
+            make_kid(1, epoch, 0),
         )
     };
 
@@ -414,13 +324,11 @@ fn main() -> Result<()> {
         ka_send, kv_send, ka_recv, kv_recv
     );
 
-    // Sender
     let mut s_audio = Sender::with_cipher_suite(ka_send, suite);
     s_audio.set_encryption_key(&sframe_ctx.audio_key)?;
     let mut s_video = Sender::with_cipher_suite(kv_send, suite);
     s_video.set_encryption_key(&sframe_ctx.video_key)?;
 
-    // Receiver
     let mut r_audio = Receiver::from(receiver::ReceiverOptions {
         cipher_suite: suite,
         n_ratchet_bits: None,
@@ -522,9 +430,9 @@ fn main() -> Result<()> {
 
                 if inspect {
                     match sid {
-                        SID_VIDEO => inspect_packet_compact("[RX][VID]", pkt),
-                        SID_AUDIO => inspect_packet_compact("[RX][AUD]", pkt),
-                        _         => inspect_packet_compact("[RX][UNK]", pkt),
+                        SID_VIDEO => output::inspect_packet_compact("[RX][VID]", pkt),
+                        SID_AUDIO => output::inspect_packet_compact("[RX][AUD]", pkt),
+                        _         => output::inspect_packet_compact("[RX][UNK]", pkt),
                     }
                 }
 
@@ -715,7 +623,7 @@ fn main() -> Result<()> {
                 };
 
                 if inspect && (n % 30 == 0) {
-                    inspect_packet_compact("[TX][VID]", pkt);
+                    output::inspect_packet_compact("[TX][VID]", pkt);
                 }
 
                 if let Err(e) = send_frame(&stream, SID_VIDEO, pkt) {
@@ -840,49 +748,5 @@ fn main() -> Result<()> {
 
     /* ─────────── Event loop (VIDEO DISPLAY RX) ─────────── */
 
-    let event_loop = EventLoop::new();
-    let window = WindowBuilder::new()
-        .with_title("MLS SFrame A/V — ESC per uscire")
-        .with_inner_size(LogicalSize::new(640.0, 480.0))
-        .build(&event_loop)
-        .unwrap();
-    let window_size = window.inner_size();
-    let surface_texture = SurfaceTexture::new(window_size.width, window_size.height, &window);
-    let mut pixels = Pixels::new(640, 480, surface_texture)?;
-
-    event_loop.run(move |event, _, control_flow| {
-        *control_flow = ControlFlow::Poll;
-        match event {
-            Event::WindowEvent {
-                event: WindowEvent::CloseRequested
-                | WindowEvent::KeyboardInput {
-                    input: KeyboardInput {
-                        virtual_keycode: Some(VirtualKeyCode::Escape),
-                        state: ElementState::Pressed,
-                        ..
-                    },
-                    ..
-                },
-                ..
-            } => {
-                *control_flow = ControlFlow::Exit;
-            }
-            Event::RedrawRequested(_) => {
-                let (w,h,buf) = {
-                    let fb = fb_video.lock().unwrap();
-                    (fb.0, fb.1, fb.2.clone())
-                };
-                if w>0 && h>0 && buf.len()==w*h*4 {
-                    pixels.resize_surface(w as u32, h as u32);
-                    pixels.resize_buffer(w as u32, h as u32);
-                    pixels.frame_mut().copy_from_slice(&buf);
-                }
-                if pixels.render().is_err() {
-                    *control_flow = ControlFlow::Exit;
-                }
-            }
-            Event::MainEventsCleared => window.request_redraw(),
-            _ => {}
-        }
-    });
+    output::run_video_display(fb_video);
 }
