@@ -8,7 +8,6 @@ use openmls::prelude::*;
 use openmls_rust_crypto::OpenMlsRustCrypto;
 use openmls_basic_credential::SignatureKeyPair;
 
-
 /// Segreti MLS che useremo come base per SFrame
 #[derive(Debug, Clone)]
 pub struct MlsSessionKeys {
@@ -67,7 +66,7 @@ fn mls_generate_keys() -> Result<MlsSessionKeys> {
         credential_with_key,
     )?;
 
-    // Epoch come u64
+    // Epoch MLS come u64 (es. per logging / derivazioni future)
     let epoch_u64 = group.epoch().as_u64();
 
     // Segreti derivati dal master secret di gruppo
@@ -88,7 +87,7 @@ fn mls_generate_keys() -> Result<MlsSessionKeys> {
     let base_kid = u64::from_le_bytes(arr);
 
     println!(
-        "[MLS] epoch = {epoch_u64}, base_kid = {base_kid}, audio_len = {}, video_len = {}",
+        "[MLS] local group created → epoch = {epoch_u64}, base_kid = {base_kid}, audio_len = {}, video_len = {}",
         audio.len(),
         video.len()
     );
@@ -162,28 +161,59 @@ fn mls_recv_keys(stream: &mut TcpStream) -> std::io::Result<MlsSessionKeys> {
     })
 }
 
-/// A partire dal base_kid deriviamo 4 KID consecutivi:
-/// - server: send = {base, base+1}, recv = {base+2, base+3}
-/// - client: send = {base+2, base+3}, recv = {base, base+1}
-fn compute_kids(role: MlsRole, base_kid: u64) -> KidMapping {
-    let ka0 = base_kid;        // 0
-    let kv0 = base_kid + 1;    // 1
-    let ka1 = base_kid + 2;    // 2
-    let kv1 = base_kid + 3;    // 3
+/// Schema generalizzabile per N peer:
+///
+/// Dato un `base_kid` globale e un `sender_index` (0,1,2,...),
+/// assegna:
+///   - audio_kid(i) = base_kid + 2*i
+///   - video_kid(i) = base_kid + 2*i + 1
+///
+/// Nella demo a 2 peer:
+///   - server → sender_index = 0
+///   - client → sender_index = 1
+pub fn kid_for_sender(base_kid: u64, sender_index: u64) -> (u64, u64) {
+    let aud = base_kid + 2 * sender_index;
+    let vid = base_kid + 2 * sender_index + 1;
+    (aud, vid)
+}
 
+/// A partire dal base_kid deriviamo KID per:
+/// - il nostro ruolo (send_*),
+/// - il peer remoto (recv_*).
+///
+/// Schema pensato come "mini gruppo" generalizzabile:
+///   - server: sender_index_self = 0, sender_index_peer = 1
+///   - client: sender_index_self = 1, sender_index_peer = 0
+fn compute_kids(role: MlsRole, base_kid: u64) -> KidMapping {
     match role {
-        MlsRole::Server => KidMapping {
-            send_aud: ka0,
-            send_vid: kv0,
-            recv_aud: ka1,
-            recv_vid: kv1,
-        },
-        MlsRole::Client => KidMapping {
-            send_aud: ka1,
-            send_vid: kv1,
-            recv_aud: ka0,
-            recv_vid: kv0,
-        },
+        MlsRole::Server => {
+            let self_idx = 0u64;
+            let peer_idx = 1u64;
+
+            let (self_aud, self_vid) = kid_for_sender(base_kid, self_idx);
+            let (peer_aud, peer_vid) = kid_for_sender(base_kid, peer_idx);
+
+            KidMapping {
+                send_aud: self_aud,
+                send_vid: self_vid,
+                recv_aud: peer_aud,
+                recv_vid: peer_vid,
+            }
+        }
+        MlsRole::Client => {
+            let self_idx = 1u64;
+            let peer_idx = 0u64;
+
+            let (self_aud, self_vid) = kid_for_sender(base_kid, self_idx);
+            let (peer_aud, peer_vid) = kid_for_sender(base_kid, peer_idx);
+
+            KidMapping {
+                send_aud: self_aud,
+                send_vid: self_vid,
+                recv_aud: peer_aud,
+                recv_vid: peer_vid,
+            }
+        }
     }
 }
 

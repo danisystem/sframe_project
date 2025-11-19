@@ -259,10 +259,11 @@ fn main() -> Result<()> {
     println!(
         "[MLS] epoch = {}, base_kid = {}, audio_len = {}, video_len = {}",
         mls_keys.epoch,
+        mls_keys.base_kid,
         mls_keys.audio_secret.len(),
         mls_keys.video_secret.len(),
-        mls_keys.base_kid,
     );
+
 
     println!(
         "[MLS] KID mapping → send_aud={}, send_vid={}, recv_aud={}, recv_vid={}",
