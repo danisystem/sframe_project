@@ -5,35 +5,72 @@
 //
 // Layer logici:
 //
-//   1. UI           : gestione bottoni, log, <video> DOM (ui.js)
-//   2. SFrame       : HKDF, WasmPeer, encrypt/decrypt (sframe_layer.js)
+//   1. UI           : gestione bottoni, log, <video> DOM
+//   2. SFrame       : derivazione chiavi, WasmPeer, encrypt/decrypt
 //   3. WebRTC       : RTCPeerConnection (publisher/subscriber)
 //   4. Janus SFU    : signaling via WebSocket (VideoRoom plugin)
 //
 // ─────────────────────────────────────────────────────────────
 
-import { els, log, setConnectedUI } from './ui.js';
-import {
-  ensureTxPeerForLocal,
-  ensureRxPeerForFeed,
-  attachSenderTransform,
-  attachReceiverTransform,
-  freeTxPeer,
-} from './sframe_layer.js';
+import { hkdf } from './hkdf.js';
 
 // ─────────────────────────────────────────────────────────────
-// 3. WebRTC / Janus SFU layer
+// 1. UI
 // ─────────────────────────────────────────────────────────────
 
-// Stato Janus / WebRTC per il publisher (noi)
-let ws = null;
-let sessionId = null;
-let pluginHandlePub = null;
-let pcPub = null;
-let localStream = null;
+const els = {
+  wsUrl: document.getElementById('wsUrl'),
+  roomId: document.getElementById('roomId'),
+  displayName: document.getElementById('displayName'),
 
-// Keepalive verso Janus
-let keepaliveTimer = null;
+  btnConnect: document.getElementById('btnConnect'),
+  btnHangup: document.getElementById('btnHangup'),
+  btnToggleMic: document.getElementById('btnToggleMic'),
+  btnToggleCam: document.getElementById('btnToggleCam'),
+
+  localVideo: document.getElementById('localVideo'),
+  remoteVideos: document.getElementById('remoteVideos'),
+
+  log: document.getElementById('log'),
+  chkSFrame: document.getElementById('chkSFrame'),
+};
+
+function log(...a) {
+  els.log.value += a.map(String).join(' ') + '\n';
+  els.log.scrollTop = els.log.scrollHeight;
+}
+
+function setConnectedUI(connected) {
+  els.btnConnect.disabled = connected;
+  els.btnHangup.disabled = !connected;
+  els.btnToggleMic.disabled = !connected;
+  els.btnToggleCam.disabled = !connected;
+
+  if (!connected) {
+    els.btnToggleMic.textContent = 'Mic OFF';
+    els.btnToggleCam.textContent = 'Cam OFF';
+  }
+}
+
+// Log SFrame opzionale (solo se checkbox attivata)
+function logSFrame(...a) {
+  if (!els.chkSFrame || !els.chkSFrame.checked) return;
+  log(...a);
+}
+
+// ─────────────────────────────────────────────────────────────
+// 2. SFrame / Crypto layer (HKDF + WasmPeer)
+// ─────────────────────────────────────────────────────────────
+
+// KID fissati: 1=audio, 2=video
+const KID_AUDIO = 1;
+const KID_VIDEO = 2;
+
+// Secret base di sviluppo (in futuro: exporter da MLS)
+const BASE_SECRET = new TextEncoder().encode('DEV-ONLY-BASE-SECRET');
+
+// TX peer locale (usato per cifrare i frame che inviamo)
+let txPeer = null;
 
 // Mappa feedId → subscriber info
 // sub = {
@@ -46,7 +83,94 @@ let keepaliveTimer = null;
 // }
 const subscribers = new Map();
 
-// ───── Keepalive ─────
+/**
+ * Deriva un secret per-mittente a partire dall’etichetta logica
+ * (nel nostro caso: displayName = identity nella room).
+ *
+ * In futuro, al posto di BASE_SECRET, si userà un exporter da MLS.
+ */
+async function deriveSenderSecret(senderLabel) {
+  return hkdf(BASE_SECRET, `sender=${senderLabel}`);
+}
+
+/**
+ * Inizializza il WasmPeer per TX locale, se non esiste.
+ * Ritorna true se TX SFrame è pronto, false se invieremo in chiaro.
+ */
+async function ensureTxPeerForLocal() {
+  if (txPeer) return true;
+  if (!window.SFRAME?.WasmPeer) {
+    log('⚠️ SFRAME non pronto (WasmPeer mancante), TX in chiaro.');
+    return false;
+  }
+
+  let disp = (els.displayName.value || '').trim();
+  if (!disp) {
+    disp = 'user-' + Math.random().toString(36).slice(2, 8);
+    els.displayName.value = disp;
+  }
+
+  try {
+    const secret = await deriveSenderSecret(disp);
+    txPeer = new window.SFRAME.WasmPeer(
+      KID_AUDIO,
+      KID_VIDEO,
+      null,
+      secret,
+    );
+    log('Local SFrame TX peer pronto per', disp);
+    return true;
+  } catch (e) {
+    console.error('ensureTxPeerForLocal err', e);
+    log('⚠️ Errore inizializzazione TX peer, TX in chiaro.');
+    txPeer = null;
+    return false;
+  }
+}
+
+/**
+ * Inizializza, se necessario, il WasmPeer RX per un certo feed remoto.
+ */
+async function ensureRxPeerForFeed(sub) {
+  if (sub.rxPeer) return true;
+  if (!window.SFRAME?.WasmPeer) {
+    log(`⚠️ SFRAME non pronto (RX), feed=${sub.feedId}, RX in chiaro.`);
+    return false;
+  }
+
+  const label = sub.display || String(sub.feedId);
+  try {
+    const secret = await deriveSenderSecret(label);
+    sub.rxPeer = window.SFRAME.WasmPeer.new_full_duplex(
+      99, 98,             // TX dummy
+      KID_AUDIO,
+      KID_VIDEO,
+      null,
+      secret,
+    );
+    log(`SFrame RX peer pronto per feed=${sub.feedId} (${label})`);
+    return true;
+  } catch (e) {
+    console.error('ensureRxPeerForFeed err', e);
+    log(`⚠️ Errore inizializzazione RX peer per feed=${sub.feedId}, RX in chiaro.`);
+    sub.rxPeer = null;
+    return false;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+// 3. WebRTC layer (RTCPeerConnection + Insertable Streams)
+// ─────────────────────────────────────────────────────────────
+
+// Stato Janus / WebRTC per il publisher (noi)
+let ws = null;
+let sessionId = null;
+let pluginHandlePub = null;
+let pcPub = null;
+let localStream = null;
+
+// Keepalive verso Janus
+let keepaliveTimer = null;
 
 function startKeepalive() {
   if (!sessionId || !ws || ws.readyState !== WebSocket.OPEN) return;
@@ -76,6 +200,132 @@ function stopKeepalive() {
 // Helpers vari
 function makeTxId(prefix) {
   return `${prefix}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+// ===== TX: attach transform su RTCRtpSender =====
+
+function attachSenderTransform(sender, kind) {
+  if (!sender) {
+    log('attachSenderTransform: sender mancante per', kind);
+    return;
+  }
+  if (typeof sender.createEncodedStreams !== 'function') {
+    log('⚠️ sender.createEncodedStreams non disponibile per ' + kind);
+    return;
+  }
+
+  let streams;
+  try {
+    streams = sender.createEncodedStreams();
+  } catch (e) {
+    log('⚠️ createEncodedStreams(TX) ha lanciato su ' + kind + ': ' + (e.message || e));
+    console.warn('createEncodedStreams sender error', e);
+    return;
+  }
+
+  const { readable, writable } = streams;
+  log('Encoded transform TX attaccato su', kind);
+
+  const transform = new TransformStream({
+    transform(chunk, controller) {
+      try {
+        if (!txPeer || !window.SFRAME) {
+          controller.enqueue(chunk);
+          return;
+        }
+
+        const inU8 = new Uint8Array(chunk.data);
+        let outU8;
+
+        if (kind === 'audio') {
+          outU8 = txPeer.encrypt_audio(inU8);
+        } else {
+          outU8 = txPeer.encrypt_video(inU8);
+        }
+
+        // Log opzionale header SFrame TX
+        if (window.SFRAME.inspect && Math.random() * 20 < 1) {
+          try {
+            const info = window.SFRAME.inspect(outU8);
+            logSFrame(`[TX/${kind}] ${info}`);
+          } catch {}
+        }
+
+        chunk.data = outU8.buffer;
+        controller.enqueue(chunk);
+      } catch (e) {
+        console.warn('encrypt err', e);
+        controller.enqueue(chunk);
+      }
+    },
+  });
+
+  readable.pipeThrough(transform).pipeTo(writable).catch(e => {
+    console.warn('pipeTo TX err', e);
+  });
+}
+
+// ===== RX: attach transform su RTCRtpReceiver =====
+
+function attachReceiverTransform(receiver, kind, sub) {
+  if (!receiver) {
+    log('attachReceiverTransform: receiver mancante per', kind, 'feed=', sub.feedId);
+    return;
+  }
+  if (typeof receiver.createEncodedStreams !== 'function') {
+    log('⚠️ receiver.createEncodedStreams non disponibile per ' + kind + ' feed=' + sub.feedId);
+    return;
+  }
+
+  let streams;
+  try {
+    streams = receiver.createEncodedStreams();
+  } catch (e) {
+    log('⚠️ createEncodedStreams(RX) ha lanciato su ' + kind + ' feed=' + sub.feedId + ': ' + (e.message || e));
+    console.warn('createEncodedStreams receiver error', e);
+    return;
+  }
+
+  const { readable, writable } = streams;
+  log('Encoded transform RX attaccato su', kind, 'feed=', sub.feedId);
+
+  const transform = new TransformStream({
+    transform(chunk, controller) {
+      try {
+        if (!sub.rxPeer || !window.SFRAME) {
+          controller.enqueue(chunk);
+          return;
+        }
+
+        const inU8 = new Uint8Array(chunk.data);
+
+        // Log opzionale header SFrame RX
+        if (window.SFRAME.inspect && Math.random() * 20 < 1) {
+          try {
+            const hdrInfo = window.SFRAME.inspect(inU8);
+            logSFrame(`[RX/${kind} feed=${sub.feedId}] ${hdrInfo}`);
+          } catch {}
+        }
+
+        let outU8;
+        if (kind === 'audio') {
+          outU8 = sub.rxPeer.decrypt_audio(inU8);
+        } else {
+          outU8 = sub.rxPeer.decrypt_video(inU8);
+        }
+
+        chunk.data = outU8.buffer;
+        controller.enqueue(chunk);
+      } catch (e) {
+        console.warn('decrypt err', e);
+        controller.enqueue(chunk);
+      }
+    },
+  });
+
+  readable.pipeThrough(transform).pipeTo(writable).catch(e => {
+    console.warn('pipeTo RX err', e);
+  });
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -125,7 +375,7 @@ function handleJanusSuccess(msg) {
   if (transaction && transaction.startsWith('create-')) {
     sessionId = data.id;
     log('Session ID:', sessionId);
-    startKeepalive();
+    startKeepalive();            // ← keepalive dopo creazione sessione
     attachPublisherHandle();
     return;
   }
@@ -587,7 +837,7 @@ function cleanup() {
   localStream = null;
   els.localVideo.srcObject = null;
 
-  for (const [_, sub] of subscribers) {
+  for (const [feedId, sub] of subscribers) {
     if (sub.pc) {
       try { sub.pc.close(); } catch {}
     }
@@ -601,7 +851,10 @@ function cleanup() {
   sessionId = null;
   pluginHandlePub = null;
 
-  freeTxPeer();
+  if (txPeer && txPeer.free) {
+    try { txPeer.free(); } catch {}
+  }
+  txPeer = null;
 
   setConnectedUI(false);
 }

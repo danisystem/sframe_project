@@ -1,5 +1,5 @@
 // appJanus.js
-import { hkdf } from './hkdf.js';
+import { hkdf } from '../hkdf.js';
 
 const els = {
   wsUrl: document.getElementById('wsUrl'),
