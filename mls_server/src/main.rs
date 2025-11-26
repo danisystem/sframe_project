@@ -73,8 +73,8 @@ impl Default for Groups {
             .use_ratchet_tree_extension(true)
             .build();
 
-        // Crea gruppo
-        let mut group = MlsGroup::new(
+        // Crea gruppo con un solo membro (server)
+        let group = MlsGroup::new(
             &provider,
             &sig,
             &config,
@@ -82,14 +82,15 @@ impl Default for Groups {
         )
         .expect("group create");
 
-        // Estrai master secret
+        // Estrai master secret che useremo come base per SFrame
         let master = group
             .export_secret(provider.crypto(), "SFRAME_MASTER", &[], 32)
             .expect("export master");
 
-        let epoch = group.epoch().as_u64(); // FIX
+        let epoch = group.epoch().as_u64();
         let gid = group.group_id().to_vec();
 
+        // Roster iniziale: solo il server, index = 0
         let roster = vec![
             MemberEntry {
                 index: 0,
@@ -119,6 +120,25 @@ async fn handle_join(
 
     let mut gs = groups.inner.lock().unwrap();
 
+    // Se l'identity esiste già in roster, riusa lo stesso index
+    if let Some(existing) = gs.roster.iter().find(|m| m.identity == req.identity) {
+        let master_b64 =
+            base64::engine::general_purpose::STANDARD.encode(&gs.master_secret);
+        let gid_hex = gs.group_id.iter().map(|b| format!("{:02x}", b)).collect::<String>();
+
+        let resp = JoinResponse {
+            epoch: gs.epoch,
+            group_id: gid_hex,
+            master_secret: master_b64,
+            sender_index: existing.index,
+            roster: gs.roster.clone(),
+        };
+
+        println!("[MLS] re-join identity={} → sender_index={}", existing.identity, existing.index);
+        return Ok(warp::reply::json(&resp));
+    }
+
+    // Altrimenti è una nuova identity → assegna nuovo index
     let new_idx = gs.roster.len() as u32;
 
     gs.roster.push(MemberEntry {
@@ -126,11 +146,9 @@ async fn handle_join(
         identity: req.identity.clone(),
     });
 
-    // master → base64
     let master_b64 =
         base64::engine::general_purpose::STANDARD.encode(&gs.master_secret);
 
-    // group id → hex
     let gid_hex = gs.group_id.iter().map(|b| format!("{:02x}", b)).collect::<String>();
 
     let resp = JoinResponse {
@@ -140,6 +158,8 @@ async fn handle_join(
         sender_index: new_idx,
         roster: gs.roster.clone(),
     };
+
+    println!("[MLS] new join identity={} → sender_index={}", req.identity, new_idx);
 
     Ok(warp::reply::json(&resp))
 }
@@ -167,7 +187,6 @@ async fn main() {
 
     println!("MLS server running on http://0.0.0.0:3000");
     warp::serve(routes).run(([0, 0, 0, 0], 3000)).await;
-
 }
 
 fn with_groups(

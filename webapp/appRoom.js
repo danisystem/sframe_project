@@ -15,6 +15,8 @@ import {
   deriveTxKey,
   deriveRxKey,
   computeKid,
+  attachIndexToIdentity,
+  parseIdentityWithIndex,
 } from "./mls_sframe_session.js";
 
 import {
@@ -32,9 +34,11 @@ let pcPub = null;
 let keepaliveTimer = null;
 let localStream = null;
 
-let mlsInfo = null;  // {sender_index, epoch, master_secret, roster}
+// Info MLS per questo peer:
+// { sender_index, epoch, master_secret, roster }
+let mlsInfo = null;
 
-const subscribers = new Map(); // feedId → {feedId, display, pc, rxPeer, videoEl}
+const subscribers = new Map(); // feedId → {feedId, display, pc, rxPeer, videoEl, handleId}
 
 
 // ─────────────────────────────────────────────────────────────
@@ -108,6 +112,7 @@ function handleSuccess(msg) {
   if (transaction?.startsWith("attach-pub-")) {
     pluginHandlePub = data.id;
     Output.janus("Publisher handle", pluginHandlePub);
+    // join MLS + VideoRoom (async)
     joinAsPublisher();
     return;
   }
@@ -167,6 +172,7 @@ function handleEvent(msg) {
   }
 }
 
+
 // ─────────────────────────────────────────────────────────────
 // Publisher
 // ─────────────────────────────────────────────────────────────
@@ -180,40 +186,60 @@ function attachPublisherHandle() {
   });
 }
 
-function joinAsPublisher() {
+async function joinAsPublisher() {
   const room = Number(els.roomId.value) || 1234;
-  const identity = els.displayName.value.trim() || ("user-" + crypto.randomUUID());
+  const baseIdentity = els.displayName.value.trim() || ("user-" + crypto.randomUUID());
 
-  Output.ui("Join as publisher", { room, identity });
+  try {
+    // 1) MLS JOIN (se non già fatto)
+    if (!mlsInfo) {
+      mlsInfo = await mlsJoin(baseIdentity);
+      Output.mls("MLS JOIN OK", mlsInfo);
+    }
 
-  sendJanus({
-    janus: "message",
-    transaction: makeTxId("join-pub"),
-    session_id: sessionId,
-    handle_id: pluginHandlePub,
-    body: {
-      request: "join",
-      ptype: "publisher",
-      room,
-      display: identity,
-    },
-  });
+    // 2) Identity per Janus = "nome#sender_index"
+    const fullIdentity = attachIndexToIdentity(baseIdentity, mlsInfo.sender_index);
+
+    Output.ui("Join as publisher", { room, identity: fullIdentity });
+
+    // 3) Join VideoRoom
+    sendJanus({
+      janus: "message",
+      transaction: makeTxId("join-pub"),
+      session_id: sessionId,
+      handle_id: pluginHandlePub,
+      body: {
+        request: "join",
+        ptype: "publisher",
+        room,
+        display: fullIdentity,  // molto importante
+      },
+    });
+
+  } catch (e) {
+    console.error("joinAsPublisher error:", e);
+    Output.error("joinAsPublisher error", String(e));
+  }
 }
 
 async function startPublishing() {
   try {
-    // MLS join
-    const identity = els.displayName.value.trim();
-    mlsInfo = await mlsJoin(identity);
-    Output.mls("MLS JOIN OK", mlsInfo);
+    // In caso di race (improbabile): garantiamo che mlsInfo ci sia
+    if (!mlsInfo) {
+      const baseIdentity = els.displayName.value.trim() || ("user-" + crypto.randomUUID());
+      mlsInfo = await mlsJoin(baseIdentity);
+      Output.mls("MLS JOIN (late) OK", mlsInfo);
+    }
 
     // Init SFrame
     await initSFrame();
 
-    // TX KEY derivata via MLS
-const txKey = await deriveTxKey(mlsInfo.master_secret, mlsInfo.sender_index);
+    // TX KEY derivata via MLS (per il nostro sender_index)
+    const selfIndex = mlsInfo.sender_index;
+    const txKey = await deriveTxKey(mlsInfo.master_secret, selfIndex);
 
-    const kidAudio = computeKid(mlsInfo.epoch, mlsInfo.sender_index);
+    // KID TX (audio/video) per questo peer
+    const kidAudio = computeKid(mlsInfo.epoch, selfIndex);
     const kidVideo = kidAudio + 1;
 
     const txPeer = createTxPeer(kidAudio, kidVideo, txKey);
@@ -329,7 +355,7 @@ function subscribeToPublisher(feedId, display) {
 
   subscribers.set(feedId, {
     feedId,
-    display,
+    display,   // sarà tipo "nome#senderIndex"
     pc: null,
     handleId: null,
     rxPeer: null,
@@ -415,23 +441,25 @@ async function handleSubscriberJsep(feedId, sub, jsep) {
 
     await sub.pc.setRemoteDescription(new RTCSessionDescription(jsep));
 
-    // MLS – trova remote sender_index
-    const remoteName = (sub.display || "").trim().toLowerCase();
-    const entry = mlsInfo.roster.find(
-      r => (r.identity || "").toLowerCase() === remoteName
-    );
+    // ───── MLS – derivazione RX in base a sender_index nel display ─────
+    if (!mlsInfo) {
+      Output.error("MLS not initialized for subscriber", {});
+      return;
+    }
 
-    if (!entry) {
-      Output.error("MLS roster: sender_index not found", {
+    // sub.display è qualcosa tipo "nome#senderIndex"
+    const { identity: remoteName, senderIndex: remoteIndex } =
+      parseIdentityWithIndex(sub.display);
+
+    if (remoteIndex == null) {
+      Output.error("MLS: sender_index missing in remote display", {
+        display: sub.display,
         remoteName,
-        roster: mlsInfo.roster,
       });
       return;
     }
 
-    const remoteIndex = entry.index;
-
-    // Deriva RX key + KID
+    // Deriva RX key + KID per questo sender_index remoto
     const rxKey = await deriveRxKey(mlsInfo.master_secret, remoteIndex);
     const kidAudio = computeKid(mlsInfo.epoch, remoteIndex);
     const kidVideo = kidAudio + 1;
@@ -490,8 +518,23 @@ function attachReceiverTransform(receiver, kind, sub) {
 
 
 // ─────────────────────────────────────────────────────────────
-// Cleanup
+// Cleanup & subscriber removal
 // ─────────────────────────────────────────────────────────────
+
+function removeSubscriber(feedId) {
+  const sub = subscribers.get(feedId);
+  if (!sub) return;
+
+  try {
+    if (sub.pc) sub.pc.close();
+  } catch {}
+
+  if (sub.videoEl && sub.videoEl.parentNode) {
+    sub.videoEl.parentNode.remove();
+  }
+
+  subscribers.delete(feedId);
+}
 
 function connectAndJoinRoom() {
   const url = els.wsUrl.value || "ws://localhost:8188/";
