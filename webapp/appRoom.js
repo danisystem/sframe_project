@@ -1,15 +1,16 @@
 // appRoom.js
 // ─────────────────────────────────────────────────────────────
-// Janus VideoRoom + SFrame + MLS – versione modulare finale
+// Janus VideoRoom + SFrame + MLS – versione modulare
 // ─────────────────────────────────────────────────────────────
 
-// Carica WASM prima di tutto
+// Carica WASM SFrame (espone window.SFRAME.WasmPeer, ecc.)
 import "./bootstrap_sframe.js";
 
-// Moduli
+// Moduli UI / log
 import { els, setConnectedUI } from "./ui.js";
 import { Output } from "./output.js";
 
+// MLS → segreti + mapping index/identity + KID
 import {
   mlsJoin,
   deriveTxKey,
@@ -19,6 +20,7 @@ import {
   parseIdentityWithIndex,
 } from "./mls_sframe_session.js";
 
+// Layer SFrame (wrapper attorno a WasmPeer di sframe_core)
 import {
   initSFrame,
   createTxPeer,
@@ -26,7 +28,10 @@ import {
 } from "./sframe_layer.js";
 
 
+// ─────────────────────────────────────────────────────────────
 // Stato globale
+// ─────────────────────────────────────────────────────────────
+
 let ws = null;
 let sessionId = null;
 let pluginHandlePub = null;
@@ -38,11 +43,12 @@ let localStream = null;
 // { sender_index, epoch, master_secret, roster }
 let mlsInfo = null;
 
-const subscribers = new Map(); // feedId → {feedId, display, pc, rxPeer, videoEl, handleId}
+// feedId → {feedId, display, pc, rxPeer, videoEl, handleId}
+const subscribers = new Map();
 
 
 // ─────────────────────────────────────────────────────────────
-// UTIL
+// Utilità
 // ─────────────────────────────────────────────────────────────
 
 function sendJanus(msg) {
@@ -95,7 +101,10 @@ function onJanusMessage(evt) {
 }
 
 
+// ─────────────────────────────────────────────────────────────
 // SUCCESS
+// ─────────────────────────────────────────────────────────────
+
 function handleSuccess(msg) {
   const { transaction, data } = msg;
 
@@ -129,7 +138,10 @@ function handleSuccess(msg) {
 }
 
 
+// ─────────────────────────────────────────────────────────────
 // EVENT
+// ─────────────────────────────────────────────────────────────
+
 function handleEvent(msg) {
   const { sender, plugindata, jsep } = msg;
 
@@ -137,12 +149,13 @@ function handleEvent(msg) {
   const data = plugindata.data || {};
   const vr = data.videoroom;
 
-  // Events for Publisher (our handle)
+  // Eventi per il nostro Publisher
   if (sender === pluginHandlePub) {
 
     if (vr === "joined") {
       Output.janus("Joined as publisher", data.id);
 
+      // publisher già presenti
       if (Array.isArray(data.publishers)) {
         data.publishers.forEach(p => subscribeToPublisher(p.id, p.display));
       }
@@ -163,7 +176,7 @@ function handleEvent(msg) {
     return;
   }
 
-  // Subscriber events
+  // Eventi per i Subscriber
   for (const [feedId, sub] of subscribers.entries()) {
     if (sub.handleId === sender) {
       if (jsep) handleSubscriberJsep(feedId, sub, jsep);
@@ -186,6 +199,7 @@ function attachPublisherHandle() {
   });
 }
 
+// Join come publisher: MLS JOIN → identity#sender_index → join Janus
 async function joinAsPublisher() {
   const room = Number(els.roomId.value) || 1234;
   const baseIdentity = els.displayName.value.trim() || ("user-" + crypto.randomUUID());
@@ -212,7 +226,7 @@ async function joinAsPublisher() {
         request: "join",
         ptype: "publisher",
         room,
-        display: fullIdentity,  // molto importante
+        display: fullIdentity,
       },
     });
 
@@ -224,21 +238,24 @@ async function joinAsPublisher() {
 
 async function startPublishing() {
   try {
-    // In caso di race (improbabile): garantiamo che mlsInfo ci sia
+    // safety: se per qualche motivo mlsInfo non c'è, rifacciamo join
     if (!mlsInfo) {
       const baseIdentity = els.displayName.value.trim() || ("user-" + crypto.randomUUID());
       mlsInfo = await mlsJoin(baseIdentity);
       Output.mls("MLS JOIN (late) OK", mlsInfo);
     }
 
-    // Init SFrame
+    // Init SFrame WASM
     await initSFrame();
 
-    // TX KEY derivata via MLS (per il nostro sender_index)
+    // TX key derivata via MLS (singola chiave per audio+video)
     const selfIndex = mlsInfo.sender_index;
     const txKey = await deriveTxKey(mlsInfo.master_secret, selfIndex);
 
-    // KID TX (audio/video) per questo peer
+    // KID TX (audio/video) per questo peer.
+    // computeKid(epoch, index) è implementata in modo che:
+    //   - dipende da epoch e sender_index
+    //   - garantisce KID globalmente univoci per quell'epoch
     const kidAudio = computeKid(mlsInfo.epoch, selfIndex);
     const kidVideo = kidAudio + 1;
 
@@ -267,19 +284,19 @@ async function startPublishing() {
       });
     };
 
-    // Media
+    // Media locale
     localStream = await navigator.mediaDevices.getUserMedia({
       audio: { echoCancellation: true },
       video: {
         width: { ideal: 640 },
         height: { ideal: 360 },
-        frameRate: { ideal: 20, max: 25 }
-      }
+        frameRate: { ideal: 20, max: 25 },
+      },
     });
 
     els.localVideo.srcObject = localStream;
 
-    // Aggiungi tracce + trasformazioni
+    // Aggiungi tracce + trasformazioni SFrame TX
     const aTrack = localStream.getAudioTracks()[0];
     if (aTrack) {
       const s = pcPub.addTrack(aTrack, localStream);
@@ -339,7 +356,7 @@ function attachSenderTransform(sender, kind, txPeer) {
         Output.error("TX encrypt", e);
         controller.enqueue(chunk);
       }
-    }
+    },
   });
 
   readable.pipeThrough(transform).pipeTo(writable);
@@ -355,7 +372,7 @@ function subscribeToPublisher(feedId, display) {
 
   subscribers.set(feedId, {
     feedId,
-    display,   // sarà tipo "nome#senderIndex"
+    display,   // es. "nome#senderIndex"
     pc: null,
     handleId: null,
     rxPeer: null,
@@ -441,13 +458,13 @@ async function handleSubscriberJsep(feedId, sub, jsep) {
 
     await sub.pc.setRemoteDescription(new RTCSessionDescription(jsep));
 
-    // ───── MLS – derivazione RX in base a sender_index nel display ─────
+    // ───── MLS + SFrame RX: derive chiave RX e KID per questo sender remoto ─────
     if (!mlsInfo) {
       Output.error("MLS not initialized for subscriber", {});
       return;
     }
 
-    // sub.display è qualcosa tipo "nome#senderIndex"
+    // display è "nome#senderIndex"
     const { identity: remoteName, senderIndex: remoteIndex } =
       parseIdentityWithIndex(sub.display);
 
@@ -459,14 +476,13 @@ async function handleSubscriberJsep(feedId, sub, jsep) {
       return;
     }
 
-    // Deriva RX key + KID per questo sender_index remoto
     const rxKey = await deriveRxKey(mlsInfo.master_secret, remoteIndex);
     const kidAudio = computeKid(mlsInfo.epoch, remoteIndex);
     const kidVideo = kidAudio + 1;
 
     sub.rxPeer = createRxPeer(99, 98, kidAudio, kidVideo, rxKey);
 
-    // Attacca transform RX
+    // Attacca trasformazioni RX
     sub.pc.getReceivers().forEach(r => {
       if (r.track.kind === "audio") attachReceiverTransform(r, "audio", sub);
       if (r.track.kind === "video") attachReceiverTransform(r, "video", sub);
@@ -490,7 +506,10 @@ async function handleSubscriberJsep(feedId, sub, jsep) {
 }
 
 
-// Receiver Transform
+// ─────────────────────────────────────────────────────────────
+// Receiver Transform (RX)
+// ─────────────────────────────────────────────────────────────
+
 function attachReceiverTransform(receiver, kind, sub) {
   if (!receiver.createEncodedStreams) return;
 
@@ -510,7 +529,7 @@ function attachReceiverTransform(receiver, kind, sub) {
         Output.error("RX decrypt", e);
         controller.enqueue(chunk);
       }
-    }
+    },
   });
 
   readable.pipeThrough(transform).pipeTo(writable);
