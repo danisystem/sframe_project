@@ -165,8 +165,9 @@ async fn main() {
 
     let routes = join_route.with(cors);
 
-    println!("MLS server running on http://127.0.0.1:3000");
-    warp::serve(routes).run(([127, 0, 0, 1], 3000)).await;
+    println!("MLS server running on http://0.0.0.0:3000");
+    warp::serve(routes).run(([0, 0, 0, 0], 3000)).await;
+
 }
 
 fn with_groups(

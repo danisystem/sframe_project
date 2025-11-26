@@ -4,7 +4,7 @@
 import { hkdf } from "./hkdf.js";
 import { Output } from "./output.js";
 
-const SERVER_URL = "http://127.0.0.1:3000/mls/join";
+const SERVER_URL = "http://10.39.157.150:3000/mls/join";
 
 function base64ToBytes(b64) {
   if (typeof b64 !== "string") {
