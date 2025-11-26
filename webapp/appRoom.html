@@ -4,7 +4,194 @@
   <meta charset="utf-8">
   <title>Janus VideoRoom + SFrame – Multi-device E2EE</title>
   <style>
-    /* STILI IDENTICI AL TUO, NON TOCCATI */
+    body {
+      margin: 0;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #0f172a;
+      color: #e5e7eb;
+    }
+
+    .topbar {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 0.5rem 1rem;
+      padding: 0.75rem 1rem;
+      background: #020617;
+      border-bottom: 1px solid #1f2937;
+      font-size: 14px;
+    }
+
+    .topbar label {
+      display: flex;
+      align-items: center;
+      gap: 0.35rem;
+      color: #e5e7eb;
+      white-space: nowrap;
+    }
+
+    .topbar input {
+      background: #020617;
+      border: 1px solid #334155;
+      border-radius: 4px;
+      color: #e5e7eb;
+      padding: 0.2rem 0.4rem;
+      font-size: 13px;
+    }
+
+    .topbar button {
+      padding: 0.3rem 0.7rem;
+      border-radius: 6px;
+      border: 1px solid #334155;
+      background: #0b1120;
+      color: #e5e7eb;
+      cursor: pointer;
+      font-size: 13px;
+    }
+
+    .topbar button:disabled {
+      opacity: 0.5;
+      cursor: default;
+    }
+
+    .topbar button:hover:not(:disabled) {
+      background: #1e293b;
+    }
+
+    .badge {
+      margin-left: auto;
+      font-size: 12px;
+      padding: 0.2rem 0.6rem;
+      border-radius: 999px;
+      border: 1px solid #4b5563;
+      background: #111827;
+      color: #9ca3af;
+    }
+
+    .layout {
+      display: grid;
+      grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr);
+      gap: 1rem;
+      padding: 1rem;
+      min-height: calc(100vh - 56px);
+      box-sizing: border-box;
+    }
+
+    .col {
+      display: flex;
+      flex-direction: column;
+      gap: 0.75rem;
+    }
+
+    h2 {
+      margin: 0;
+      font-size: 16px;
+      font-weight: 600;
+      color: #e5e7eb;
+    }
+
+    #localVideo {
+      width: 100%;
+      max-height: 260px;
+      background: #020617;
+      border-radius: 12px;
+      border: 1px solid #1f2937;
+      object-fit: cover;
+    }
+
+    .panel {
+      border-radius: 12px;
+      border: 1px solid #1f2937;
+      background: radial-gradient(circle at top left, #1f2937 0, #020617 55%);
+      padding: 0.75rem;
+      box-sizing: border-box;
+    }
+
+    /* Remote videos grid */
+    #remoteVideos {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+      gap: 0.5rem;
+      margin-top: 0.5rem;
+    }
+
+    .remoteBox {
+      border-radius: 10px;
+      border: 1px solid #1f2937;
+      background: #020617;
+      padding: 0.4rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.25rem;
+    }
+
+    .remoteBox label {
+      font-size: 12px;
+      color: #9ca3af;
+    }
+
+    .remoteBox video {
+      width: 100%;
+      max-height: 140px;
+      border-radius: 8px;
+      background: #020617;
+      object-fit: cover;
+    }
+
+    /* Remote peers list (roster MLS) */
+    #remotePeers {
+      margin-top: 0.4rem;
+      border-radius: 8px;
+      border: 1px dashed #374151;
+      padding: 0.4rem 0.5rem;
+      min-height: 2rem;
+      font-size: 13px;
+      color: #d1d5db;
+    }
+
+    #remotePeers > div {
+      padding: 0.1rem 0;
+    }
+
+    .log-controls {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.5rem;
+    }
+
+    .log-controls h2 {
+      font-size: 15px;
+    }
+
+    .log-controls label {
+      font-size: 12px;
+      color: #9ca3af;
+      display: flex;
+      align-items: center;
+      gap: 0.25rem;
+    }
+
+    #log {
+      flex: 1;
+      width: 100%;
+      resize: none;
+      border-radius: 12px;
+      border: 1px solid #1f2937;
+      background: #020617;
+      color: #e5e7eb;
+      padding: 0.6rem;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      font-size: 12px;
+      box-sizing: border-box;
+      min-height: 0;
+    }
+
+    @media (max-width: 900px) {
+      .layout {
+        grid-template-columns: minmax(0, 1fr);
+      }
+    }
   </style>
 </head>
 <body>
@@ -27,22 +214,33 @@
 
   <div class="layout">
     <div class="col">
-      <h2>Local</h2>
-      <video id="localVideo" autoplay playsinline muted></video>
+      <div class="panel">
+        <h2>Local</h2>
+        <video id="localVideo" autoplay playsinline muted></video>
+      </div>
 
-      <h2>Remote peers</h2>
-      <div id="remoteVideos"></div>
+      <div class="panel">
+        <h2>Remote peers (MLS roster)</h2>
+        <div id="remotePeers"></div>
+      </div>
+
+      <div class="panel">
+        <h2>Remote video streams</h2>
+        <div id="remoteVideos"></div>
+      </div>
     </div>
 
     <div class="col">
-      <div class="log-controls">
-        <h2 style="margin:0;">Log</h2>
-        <label>
-          <input type="checkbox" id="chkSFrame">
-          Mostra dettagli SFrame
-        </label>
+      <div class="panel" style="display:flex; flex-direction:column; gap:0.5rem; height:100%;">
+        <div class="log-controls">
+          <h2>Log</h2>
+          <label>
+            <input type="checkbox" id="chkSFrame">
+            Mostra dettagli SFrame
+          </label>
+        </div>
+        <textarea id="log" readonly></textarea>
       </div>
-      <textarea id="log" readonly></textarea>
     </div>
   </div>
 

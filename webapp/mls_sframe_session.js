@@ -5,9 +5,13 @@ import { hkdf } from "./hkdf.js";
 import { Output } from "./output.js";
 
 // Backend MLS rust (warp) – adatta l'IP se serve
-const SERVER_URL = "http://10.39.157.150:3000/mls/join";
+const SERVER_JOIN_URL   = "http://10.39.157.150:3000/mls/join";
+const SERVER_ROSTER_URL = "http://10.39.157.150:3000/mls/roster";
 
 function base64ToBytes(b64) {
+  if (typeof b64 !== "string") {
+    throw new Error("base64ToBytes: input non è una stringa");
+  }
   const bin = atob(b64);
   const buf = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
@@ -19,7 +23,7 @@ function base64ToBytes(b64) {
 export async function mlsJoin(identity) {
   Output.mls("JOIN →", identity);
 
-  const resp = await fetch(SERVER_URL, {
+  const resp = await fetch(SERVER_JOIN_URL, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ identity }),
@@ -41,6 +45,25 @@ export async function mlsJoin(identity) {
     roster: data.roster,
     master_secret: masterBytes,
   };
+}
+
+// ---------------- MLS ROSTER (refresh) ----------------
+//
+// Usata per aggiornare la lista dei peer quando qualcuno nuovo entra.
+// Non cambia le chiavi, solo la view del roster.
+
+export async function mlsFetchRoster() {
+  const resp = await fetch(SERVER_ROSTER_URL, {
+    method: "GET",
+  });
+
+  if (!resp.ok) {
+    throw new Error("Roster MLS failed: HTTP " + resp.status);
+  }
+
+  const data = await resp.json();
+  Output.mls("ROSTER update:", data);
+  return data; // { epoch, group_id, roster }
 }
 
 // ---------------- Derivazione chiavi ----------------
@@ -74,7 +97,7 @@ export async function deriveRxKey(master, remoteSenderIndex) {
 //   - senderIndex in un blocco più piccolo
 //
 // Audio = kidAudio
-// Video = kidAudio + 1
+// Video = kidAudio + 1 (gestito in appRoom/appJanus)
 //
 // (basta per una demo, restiamo ampiamente sotto 2^53)
 

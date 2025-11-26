@@ -13,6 +13,7 @@ import { Output } from "./output.js";
 // MLS → segreti + mapping index/identity + KID
 import {
   mlsJoin,
+  mlsFetchRoster,
   deriveTxKey,
   deriveRxKey,
   computeKid,
@@ -42,6 +43,9 @@ let localStream = null;
 // Info MLS per questo peer:
 // { sender_index, epoch, master_secret, roster }
 let mlsInfo = null;
+
+// Identity “base” (senza #index), usata anche per UI remote peers
+let myIdentity = null;
 
 // feedId → {feedId, display, pc, rxPeer, videoEl, handleId}
 const subscribers = new Map();
@@ -75,6 +79,36 @@ function startKeepalive() {
 function stopKeepalive() {
   if (keepaliveTimer) clearInterval(keepaliveTimer);
   keepaliveTimer = null;
+}
+
+// UI: lista “Remote peers”
+function renderRemotePeers(roster, identityMe) {
+  const box = document.getElementById("remotePeers");
+  if (!box) return;
+
+  box.innerHTML = "";
+
+  roster.forEach(m => {
+    if (m.identity === "server") return;
+    if (m.identity === identityMe) return;
+
+    const div = document.createElement("div");
+    div.textContent = `${m.index}: ${m.identity}`;
+    box.appendChild(div);
+  });
+}
+
+// Chiede al backend MLS il roster aggiornato e refresh della UI
+async function refreshRosterUI() {
+  // se non sappiamo ancora chi siamo, non ha senso
+  if (!myIdentity) return;
+
+  try {
+    const r = await mlsFetchRoster();
+    renderRemotePeers(r.roster, myIdentity);
+  } catch (e) {
+    Output.error("MLS roster refresh failed", e);
+  }
 }
 
 
@@ -160,11 +194,18 @@ function handleEvent(msg) {
         data.publishers.forEach(p => subscribeToPublisher(p.id, p.display));
       }
 
+      // roster iniziale (dal punto di vista di chi entra ora)
+      refreshRosterUI().catch(() => {});
+
       startPublishing();
     }
 
     if (vr === "event" && Array.isArray(data.publishers)) {
+      // nuovi publisher che entrano
       data.publishers.forEach(p => subscribeToPublisher(p.id, p.display));
+
+      // aggiorna roster ovunque (anche sul peer che era già dentro)
+      refreshRosterUI().catch(() => {});
     }
 
     if (data.unpublished) removeSubscriber(data.unpublished);
@@ -202,17 +243,26 @@ function attachPublisherHandle() {
 // Join come publisher: MLS JOIN → identity#sender_index → join Janus
 async function joinAsPublisher() {
   const room = Number(els.roomId.value) || 1234;
-  const baseIdentity = els.displayName.value.trim() || ("user-" + crypto.randomUUID());
+
+  // Identity base per questo peer (senza #index MLS)
+  myIdentity =
+    els.displayName.value.trim() || ("user-" + crypto.randomUUID());
 
   try {
     // 1) MLS JOIN (se non già fatto)
     if (!mlsInfo) {
-      mlsInfo = await mlsJoin(baseIdentity);
+      mlsInfo = await mlsJoin(myIdentity);
       Output.mls("MLS JOIN OK", mlsInfo);
+
+      // aggiorna subito la lista “Remote peers” con il roster attuale
+      renderRemotePeers(mlsInfo.roster, myIdentity);
     }
 
     // 2) Identity per Janus = "nome#sender_index"
-    const fullIdentity = attachIndexToIdentity(baseIdentity, mlsInfo.sender_index);
+    const fullIdentity = attachIndexToIdentity(
+      myIdentity,
+      mlsInfo.sender_index
+    );
 
     Output.ui("Join as publisher", { room, identity: fullIdentity });
 
@@ -240,9 +290,13 @@ async function startPublishing() {
   try {
     // safety: se per qualche motivo mlsInfo non c'è, rifacciamo join
     if (!mlsInfo) {
-      const baseIdentity = els.displayName.value.trim() || ("user-" + crypto.randomUUID());
-      mlsInfo = await mlsJoin(baseIdentity);
+      myIdentity =
+        els.displayName.value.trim() || ("user-" + crypto.randomUUID());
+      mlsInfo = await mlsJoin(myIdentity);
       Output.mls("MLS JOIN (late) OK", mlsInfo);
+
+      // aggiorna lista anche qui
+      renderRemotePeers(mlsInfo.roster, myIdentity);
     }
 
     // Init SFrame WASM
@@ -253,9 +307,6 @@ async function startPublishing() {
     const txKey = await deriveTxKey(mlsInfo.master_secret, selfIndex);
 
     // KID TX (audio/video) per questo peer.
-    // computeKid(epoch, index) è implementata in modo che:
-    //   - dipende da epoch e sender_index
-    //   - garantisce KID globalmente univoci per quell'epoch
     const kidAudio = computeKid(mlsInfo.epoch, selfIndex);
     const kidVideo = kidAudio + 1;
 
@@ -607,8 +658,14 @@ function cleanup() {
   subscribers.clear();
   els.remoteVideos.innerHTML = "";
 
+  // pulisco anche la lista dei remote peers
+  const box = document.getElementById("remotePeers");
+  if (box) box.innerHTML = "";
+
   sessionId = null;
   pluginHandlePub = null;
+  mlsInfo = null;
+  myIdentity = null;
 
   setConnectedUI(false);
 }
@@ -616,7 +673,7 @@ function cleanup() {
 
 // ─────────────────────────────────────────────────────────────
 // Mic / Cam
-// ─────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────
 
 function toggleMic() {
   if (!localStream) return;

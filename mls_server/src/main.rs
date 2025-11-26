@@ -1,5 +1,5 @@
 // ─────────────────────────────────────────────────────────────
-// MLS SERVER – Single-shot export for SFrame WebApp
+// MLS SERVER – Export per SFrame WebApp + Roster endpoint
 // ─────────────────────────────────────────────────────────────
 
 use std::sync::{Arc, Mutex};
@@ -37,6 +37,13 @@ struct JoinResponse {
     roster: Vec<MemberEntry>,
 }
 
+#[derive(Debug, Serialize)]
+struct RosterResponse {
+    epoch: u64,
+    group_id: String,
+    roster: Vec<MemberEntry>,
+}
+
 #[derive(Clone)]
 struct GroupState {
     epoch: u64,
@@ -56,7 +63,8 @@ impl Default for Groups {
         let provider = OpenMlsRustCrypto::default();
 
         // Ciphersuite
-        let ciphersuite = Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519;
+        let ciphersuite =
+            Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519;
 
         // Credenziale server
         let cred = BasicCredential::new(b"server".to_vec());
@@ -110,7 +118,7 @@ impl Default for Groups {
 }
 
 // ─────────────────────────────────────────────────────────────
-// HANDLER
+// HANDLER JOIN
 // ─────────────────────────────────────────────────────────────
 
 async fn handle_join(
@@ -124,7 +132,10 @@ async fn handle_join(
     if let Some(existing) = gs.roster.iter().find(|m| m.identity == req.identity) {
         let master_b64 =
             base64::engine::general_purpose::STANDARD.encode(&gs.master_secret);
-        let gid_hex = gs.group_id.iter().map(|b| format!("{:02x}", b)).collect::<String>();
+        let gid_hex = gs.group_id
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect::<String>();
 
         let resp = JoinResponse {
             epoch: gs.epoch,
@@ -134,7 +145,10 @@ async fn handle_join(
             roster: gs.roster.clone(),
         };
 
-        println!("[MLS] re-join identity={} → sender_index={}", existing.identity, existing.index);
+        println!(
+            "[MLS] re-join identity={} → sender_index={}",
+            existing.identity, existing.index
+        );
         return Ok(warp::reply::json(&resp));
     }
 
@@ -149,7 +163,10 @@ async fn handle_join(
     let master_b64 =
         base64::engine::general_purpose::STANDARD.encode(&gs.master_secret);
 
-    let gid_hex = gs.group_id.iter().map(|b| format!("{:02x}", b)).collect::<String>();
+    let gid_hex = gs.group_id
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect::<String>();
 
     let resp = JoinResponse {
         epoch: gs.epoch,
@@ -159,7 +176,40 @@ async fn handle_join(
         roster: gs.roster.clone(),
     };
 
-    println!("[MLS] new join identity={} → sender_index={}", req.identity, new_idx);
+    println!(
+        "[MLS] new join identity={} → sender_index={}",
+        req.identity, new_idx
+    );
+
+    Ok(warp::reply::json(&resp))
+}
+
+// ─────────────────────────────────────────────────────────────
+// HANDLER ROSTER (GET /mls/roster)
+// ─────────────────────────────────────────────────────────────
+
+async fn handle_roster(
+    groups: Groups,
+) -> Result<impl warp::Reply, warp::Rejection> {
+
+    let gs = groups.inner.lock().unwrap();
+
+    let gid_hex = gs.group_id
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect::<String>();
+
+    let resp = RosterResponse {
+        epoch: gs.epoch,
+        group_id: gid_hex,
+        roster: gs.roster.clone(),
+    };
+
+    println!(
+        "[MLS] roster requested → epoch={}, members={}",
+        gs.epoch,
+        gs.roster.len()
+    );
 
     Ok(warp::reply::json(&resp))
 }
@@ -175,15 +225,22 @@ async fn main() {
     let join_route = warp::path!("mls" / "join")
         .and(warp::post())
         .and(warp::body::json())
-        .and(with_groups(groups))
+        .and(with_groups(groups.clone()))
         .and_then(handle_join);
+
+    let roster_route = warp::path!("mls" / "roster")
+        .and(warp::get())
+        .and(with_groups(groups.clone()))
+        .and_then(handle_roster);
 
     let cors = warp::cors()
         .allow_any_origin()
         .allow_headers(vec!["Content-Type"])
-        .allow_methods(vec!["POST"]);
+        .allow_methods(vec!["GET", "POST"]);
 
-    let routes = join_route.with(cors);
+    let routes = join_route
+        .or(roster_route)
+        .with(cors);
 
     println!("MLS server running on http://0.0.0.0:3000");
     warp::serve(routes).run(([0, 0, 0, 0], 3000)).await;
