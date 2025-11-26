@@ -1,58 +1,69 @@
 // mls_sframe_session.js
-// ---------------------------------------------------------
-// Simulazione di una "sessione MLS" lato client.
-// Ogni volta che un peer entra, genera:
-// - master_secret random (che poi diventa audio/video secret via HKDF)
-// - base_kid random
-// - KID audio/video derivati dal base_kid
-// ---------------------------------------------------------
+// Gestione MLS → chiavi SFrame → KID dinamici
 
-import { hkdf } from './hkdf.js';
+import { hkdf } from "./hkdf.js";
+import { Output } from "./output.js";
 
-// Lunghezze reali SFrame / MLS
-const SECRET_LEN = 32;  // 256 bit AES-GCM key
-const KID_LEN = 8;      // 64-bit KID seed
+const SERVER_URL = "http://127.0.0.1:3000/mls/join";
 
-// ---------------------------------------------------------
-// Esporta:
-//   initLocalMlsSession(displayName)
-//     → { masterSecret, audioSecret, videoSecret, baseKid, kidAudio, kidVideo }
-// ---------------------------------------------------------
+function base64ToBytes(b64) {
+  if (typeof b64 !== "string") {
+    throw new Error("base64ToBytes: input non è una stringa, got: " + String(b64));
+  }
+  const bin = atob(b64);
+  const buf = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
+  return buf;
+}
 
-export async function initLocalMlsSession(displayName) {
-  // 1) master secret random (come se arrivasse da MLS)
-  const masterSecret = new Uint8Array(SECRET_LEN);
-  crypto.getRandomValues(masterSecret);
+export async function mlsJoin(identity) {
+  Output.mls("JOIN →", identity);
 
-  // 2) base_kid random 64-bit
-  const baseKidArray = new Uint8Array(KID_LEN);
-  crypto.getRandomValues(baseKidArray);
-  const baseKid = bytesToU64(baseKidArray);
+  const resp = await fetch(SERVER_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ identity }),
+  });
 
-  // 3) Deriva due segreti indipendenti
-  const audioSecret = await hkdf(masterSecret, `audio:${displayName}`);
-  const videoSecret = await hkdf(masterSecret, `video:${displayName}`);
+  if (!resp.ok) {
+    throw new Error("Join MLS failed: HTTP " + resp.status);
+  }
 
-  // 4) Deriva i KID come nel nativo
-  const kidAudio = baseKid;
-  const kidVideo = baseKid + 1;
+  const data = await resp.json();
+
+  // Log grezzo della risposta
+  Output.mls("JOIN success:", data);
+
+  // ⚠️ Qui il campo corretto è *master_secret*, non sframe_master
+  const masterBytes = base64ToBytes(data.master_secret);
 
   return {
-    masterSecret,
-    audioSecret,
-    videoSecret,
-    baseKid,
-    kidAudio,
-    kidVideo,
+    sender_index: data.sender_index,
+    epoch: data.epoch,
+    group_id: data.group_id,
+    roster: data.roster,
+    master_secret: masterBytes,
   };
 }
 
-// Helper per convertire 8 byte → numero
-function bytesToU64(arr) {
-  let v = 0n;
-  for (let i = 0; i < 8; i++) {
-    v = (v << 8n) + BigInt(arr[i]);
-  }
-  // Ritorna come Number se rientra, altrimenti BigInt
-  return Number(v);
+// Deriva TX key
+export async function deriveTxKey(master, senderIndex) {
+  const label = `tx/${senderIndex}`;
+  const key = await hkdf(master, label, 32);
+  Output.mls("Derived TX Key", { senderIndex });
+  return key;
+}
+
+// Deriva RX key peer-specifica
+export async function deriveRxKey(master, remoteSenderIndex) {
+  const label = `rx/${remoteSenderIndex}`;
+  const key = await hkdf(master, label, 32);
+  Output.mls("Derived RX Key", { remoteSenderIndex });
+  return key;
+}
+
+// KID dinamico (stile SFrame: epoch nei bit alti, index nei bassi)
+export function computeKid(epoch, senderIndex) {
+  // epoch e index piccoli → va bene in Number JS
+  return (epoch << 16) | senderIndex;
 }

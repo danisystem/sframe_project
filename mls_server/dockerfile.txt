@@ -1,0 +1,24 @@
+# Dockerfile per mls_server
+
+FROM rust:1.82 as builder
+WORKDIR /usr/src/mls_server
+
+# Copia i file di progetto
+COPY Cargo.toml Cargo.lock ./
+COPY src ./src
+
+# Build in release
+RUN cargo build --release
+
+# Runtime minimale
+FROM debian:bookworm-slim
+WORKDIR /app
+
+# Dipendenze di sistema minime (se servono, altrimenti puoi omettere)
+RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
+
+# Copia il binario
+COPY --from=builder /usr/src/mls_server/target/release/mls_server .
+
+EXPOSE 3000
+CMD ["./mls_server"]
