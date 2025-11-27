@@ -1,12 +1,15 @@
 // output.js
 // Logging modulare e categorizzato per MLS / SFrame / Janus / WebRTC / Error
 
+import { els } from "./ui.js";
 const logEl = document.getElementById("log");
 
 function write(category, ...msg) {
   const line = `[${category}] ${msg.map(m => 
     typeof m === "object" ? JSON.stringify(m) : String(m)
   ).join(" ")}`;
+
+  
 
   console.log(line);
   if (logEl) {

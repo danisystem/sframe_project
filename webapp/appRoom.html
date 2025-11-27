@@ -92,12 +92,17 @@
 
     #localVideo {
       width: 100%;
-      max-height: 260px;
+      max-width: 480px;        /* limite orizzontale */
+      aspect-ratio: 16 / 9;    /* proporzione fissa */
+      height: auto;            /* calcolata in base all'aspect-ratio */
       background: #020617;
       border-radius: 12px;
       border: 1px solid #1f2937;
       object-fit: cover;
+      display: block;
+      margin: 0 auto;          /* centra il video nel pannello */
     }
+
 
     .panel {
       border-radius: 12px;
@@ -132,11 +137,16 @@
 
     .remoteBox video {
       width: 100%;
-      max-height: 140px;
+      max-width: 320px;        /* o 360, se li vuoi un po' più grandi */
+      aspect-ratio: 16 / 9;
+      height: auto;
       border-radius: 8px;
       background: #020617;
       object-fit: cover;
+      display: block;
+      margin: 0 auto;          /* centra il video dentro il box */
     }
+
 
     /* Remote peers list (roster MLS) */
     #remotePeers {
