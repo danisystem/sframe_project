@@ -1,7 +1,7 @@
 // ui.js
-// ─────────────────────────────────────────────
-// Raccolta elementi UI + funzioni helper
-// ─────────────────────────────────────────────
+// --------------------------------------------------------------------
+// Gestione elementi UI e stati (mic/cam/log)
+// --------------------------------------------------------------------
 
 export const els = {
   wsUrl: document.getElementById("wsUrl"),
@@ -13,17 +13,39 @@ export const els = {
   btnToggleMic: document.getElementById("btnToggleMic"),
   btnToggleCam: document.getElementById("btnToggleCam"),
 
+  btnSframeLog: document.getElementById("btnSframeLog"),
+
   localVideo: document.getElementById("localVideo"),
   remoteVideos: document.getElementById("remoteVideos"),
 
   log: document.getElementById("log"),
-  chkSFrame: document.getElementById("chkSFrame"),
 };
 
-// ─────────────────────────────────────────────
-// UI State Manager
-// ─────────────────────────────────────────────
+// --------------------------------------------------------------------
+// Stato interno per SFrame Log
+// --------------------------------------------------------------------
+let sframeLogEnabled = false;
 
+export function toggleSFrameLog() {
+  sframeLogEnabled = !sframeLogEnabled;
+
+  els.btnSframeLog.classList.toggle("on", sframeLogEnabled);
+  els.btnSframeLog.classList.toggle("off", !sframeLogEnabled);
+  els.btnSframeLog.textContent = sframeLogEnabled
+    ? "SFrame Log: ON"
+    : "SFrame Log: OFF";
+}
+
+export function isSFrameLogEnabled() {
+  return sframeLogEnabled;
+}
+
+// Bind evento
+els.btnSframeLog.addEventListener("click", toggleSFrameLog);
+
+// --------------------------------------------------------------------
+// UI generale
+// --------------------------------------------------------------------
 export function setConnectedUI(connected) {
   els.btnConnect.disabled = connected;
   els.btnHangup.disabled = !connected;

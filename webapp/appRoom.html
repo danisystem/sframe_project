@@ -103,7 +103,6 @@
       margin: 0 auto;          /* centra il video nel pannello */
     }
 
-
     .panel {
       border-radius: 12px;
       border: 1px solid #1f2937;
@@ -137,16 +136,15 @@
 
     .remoteBox video {
       width: 100%;
-      max-width: 320px;        /* o 360, se li vuoi un po' più grandi */
+      max-width: 320px;
       aspect-ratio: 16 / 9;
       height: auto;
       border-radius: 8px;
       background: #020617;
       object-fit: cover;
       display: block;
-      margin: 0 auto;          /* centra il video dentro il box */
+      margin: 0 auto;
     }
-
 
     /* Remote peers list (roster MLS) */
     #remotePeers {
@@ -197,6 +195,28 @@
       min-height: 0;
     }
 
+    /* Bottone SFrame log */
+    #btnSframeLog {
+      padding: 5px 10px;
+      margin-left: 6px;
+      border-radius: 6px;
+      border: 1px solid #334155;
+      background: #111827;
+      color: #e5e7eb;
+      cursor: pointer;
+      font-size: 12px;
+    }
+
+    #btnSframeLog.off {
+      background: #444;
+      color: #ddd;
+    }
+
+    #btnSframeLog.on {
+      background: #00a82d;
+      color: white;
+    }
+
     @media (max-width: 900px) {
       .layout {
         grid-template-columns: minmax(0, 1fr);
@@ -245,8 +265,8 @@
         <div class="log-controls">
           <h2>Log</h2>
           <label>
-            <input type="checkbox" id="chkSFrame">
             Mostra dettagli SFrame
+            <button id="btnSframeLog" class="off">SFrame Log: OFF</button>
           </label>
         </div>
         <textarea id="log" readonly></textarea>
