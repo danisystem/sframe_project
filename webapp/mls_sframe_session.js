@@ -4,9 +4,9 @@
 import { hkdf } from "./hkdf.js";
 import { Output } from "./output.js";
 
-// Backend MLS rust (warp) – adatta l'IP se serve
-const SERVER_JOIN_URL   = "http://10.39.157.150:3000/mls/join";
-const SERVER_ROSTER_URL = "http://10.39.157.150:3000/mls/roster";
+// Backend MLS via secure-server (HTTPS → proxy verso MLS HTTP interno)
+const SERVER_JOIN_URL   = "/mls/join";
+const SERVER_ROSTER_URL = "/mls/roster";
 
 function base64ToBytes(b64) {
   if (typeof b64 !== "string") {

@@ -1,0 +1,16 @@
+{
+  "CN": "SFrame Local Root CA",
+  "key": {
+    "algo": "rsa",
+    "size": 4096
+  },
+  "names": [
+    {
+      "C": "IT",
+      "L": "Modena",
+      "O": "SFrame Project",
+      "OU": "Dev CA",
+      "ST": "Emilia-Romagna"
+    }
+  ]
+}

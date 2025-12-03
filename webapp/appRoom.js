@@ -607,7 +607,7 @@ function removeSubscriber(feedId) {
 }
 
 function connectAndJoinRoom() {
-  const url = els.wsUrl.value || "ws://localhost:8188/";
+  const url = "wss://sframe.local/janus";
 
   ws = new WebSocket(url, "janus-protocol");
 
@@ -624,6 +624,7 @@ function connectAndJoinRoom() {
 
   setConnectedUI(true);
 }
+
 
 function hangup() {
   try {
