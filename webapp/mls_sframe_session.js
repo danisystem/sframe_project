@@ -1,12 +1,12 @@
 // mls_sframe_session.js
-// MLS → distribuzione segreti per SFrame (webapp)
+// MLS → distribuzione segreti per SFrame (webapp, multi-room)
 
 import { hkdf } from "./hkdf.js";
 import { Output } from "./output.js";
 
-// Backend MLS via secure-server (HTTPS → proxy verso MLS HTTP interno)
-const SERVER_JOIN_URL   = "/mls/join";
-const SERVER_ROSTER_URL = "/mls/roster";
+// Backend MLS rust (warp) – usa l'IP/hostname che stai già usando
+const SERVER_JOIN_URL   = "http://127.0.0.1:3000/mls/join";
+const SERVER_ROSTER_URL = "http://127.0.0.1:3000/mls/roster";
 
 function base64ToBytes(b64) {
   if (typeof b64 !== "string") {
@@ -19,14 +19,18 @@ function base64ToBytes(b64) {
 }
 
 // ---------------- MLS JOIN ----------------
+//
+// Ogni join ora è per (room_id, identity):
+//   - room_id = Room Janus (es. 1234)
+//   - identity = "dan", "mac", ecc.
 
-export async function mlsJoin(identity) {
-  Output.mls("JOIN →", identity);
+export async function mlsJoin(identity, roomId) {
+  Output.mls("JOIN →", { identity, roomId });
 
   const resp = await fetch(SERVER_JOIN_URL, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ identity }),
+    body: JSON.stringify({ identity, room_id: roomId }),
   });
 
   if (!resp.ok) {
@@ -42,6 +46,7 @@ export async function mlsJoin(identity) {
     sender_index: data.sender_index,
     epoch: data.epoch,
     group_id: data.group_id,
+    room_id: data.room_id,
     roster: data.roster,
     master_secret: masterBytes,
   };
@@ -49,11 +54,13 @@ export async function mlsJoin(identity) {
 
 // ---------------- MLS ROSTER (refresh) ----------------
 //
-// Usata per aggiornare la lista dei peer quando qualcuno nuovo entra.
-// Non cambia le chiavi, solo la view del roster.
+// Usata per aggiornare la lista dei peer nella room corrente.
+// GET /mls/roster?room_id=1234
 
-export async function mlsFetchRoster() {
-  const resp = await fetch(SERVER_ROSTER_URL, {
+export async function mlsFetchRoster(roomId) {
+  const url = `${SERVER_ROSTER_URL}?room_id=${encodeURIComponent(roomId)}`;
+
+  const resp = await fetch(url, {
     method: "GET",
   });
 
@@ -63,14 +70,14 @@ export async function mlsFetchRoster() {
 
   const data = await resp.json();
   Output.mls("ROSTER update:", data);
-  return data; // { epoch, group_id, roster }
+  return data; // { epoch, group_id, room_id, roster }
 }
 
 // ---------------- Derivazione chiavi ----------------
 //
-// IMPORTANTE: per ogni sender_index usiamo *la stessa label*
-// per TX e RX, così tutti i peer derivano la STESSA chiave
-// per (sender_index).
+// Per ogni sender_index usiamo la stessa label,
+// la separazione tra room avviene già perché il master_secret
+// è diverso per ogni room.
 
 function labelForSender(senderIndex) {
   return `sframe/sender/${senderIndex}`;
@@ -90,21 +97,28 @@ export async function deriveRxKey(master, remoteSenderIndex) {
   return key;
 }
 
-// ---------------- KID univoci ----------------
+// ---------------- KID univoci (room + epoch + sender) ----------------
 //
-// computeKid(epoch, senderIndex):
-//   - epoch nei bit "alti" (blocchi grandi)
-//   - senderIndex in un blocco più piccolo
+// computeKid(epoch, roomId, senderIndex):
+//   - epoch nei "blocchi" grandi
+//   - roomId in un blocco intermedio
+//   - senderIndex in quello piccolo
 //
 // Audio = kidAudio
-// Video = kidAudio + 1 (gestito in appRoom/appJanus)
+// Video = kidAudio + 1
 //
-// (basta per una demo, restiamo ampiamente sotto 2^53)
+// NOTE: Manteniamo i range sotto 2^53 per non avere problemi
+//       con i Number JS.
 
-export function computeKid(epoch, senderIndex) {
-  const base = Number(epoch) * 1_000_000 + Number(senderIndex) * 10;
-  return base; // audio
-  // video = base + 1 (lo fa appRoom)
+export function computeKid(epoch, roomId, senderIndex) {
+  const e = Number(epoch) >>> 0;       // epoch MLS (per ora sempre 0)
+  const r = Number(roomId) >>> 0;      // Janus room
+  const s = Number(senderIndex) >>> 0; // MLS sender_index
+
+  // layout: [ epoch | roomId | senderIndex | mediaBit ]
+  // epoch * 1e9  + room * 1e4 + sender * 10
+  const base = e * 1_000_000_000 + r * 10_000 + s * 10;
+  return base; // audio; video = base + 1
 }
 
 // ---------------- Identity helper ----------------

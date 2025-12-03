@@ -2,7 +2,7 @@
 <html lang="it">
 <head>
   <meta charset="utf-8">
-  <title>Janus VideoRoom + SFrame – Multi-device E2EE</title>
+  <title>Janus VideoRoom + SFrame – Multi-room E2EE</title>
   <style>
     body {
       margin: 0;
@@ -39,6 +39,10 @@
       font-size: 13px;
     }
 
+    .topbar input[readonly] {
+      opacity: 0.8;
+    }
+
     .topbar button {
       padding: 0.3rem 0.7rem;
       border-radius: 6px;
@@ -66,6 +70,19 @@
       border: 1px solid #4b5563;
       background: #111827;
       color: #9ca3af;
+    }
+
+    .invite-box {
+      display: flex;
+      align-items: center;
+      gap: 0.35rem;
+      flex: 1 1 260px;
+      min-width: 260px;
+    }
+
+    .invite-box input {
+      flex: 1;
+      min-width: 0;
     }
 
     .layout {
@@ -111,7 +128,6 @@
       box-sizing: border-box;
     }
 
-    /* Remote videos grid */
     #remoteVideos {
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
@@ -146,7 +162,6 @@
       margin: 0 auto;
     }
 
-    /* Remote peers list (roster MLS) */
     #remotePeers {
       margin-top: 0.4rem;
       border-radius: 8px;
@@ -195,7 +210,6 @@
       min-height: 0;
     }
 
-    /* Bottone SFrame log */
     #btnSframeLog {
       padding: 5px 10px;
       margin-left: 6px;
@@ -217,6 +231,12 @@
       color: white;
     }
 
+    @media (max-width: 1100px) {
+      .topbar {
+        align-items: flex-start;
+      }
+    }
+
     @media (max-width: 900px) {
       .layout {
         grid-template-columns: minmax(0, 1fr);
@@ -227,18 +247,30 @@
 <body>
   <div class="topbar">
     <label>WSS URL:
-      <input id="wsUrl" size="28" value="wss://sframe.local/janus">
+      <input id="wsUrl" size="26" value="wss://sframe.local/janus">
     </label>
-    <label>Room ID:
-      <input id="roomId" size="6" value="1234">
+
+    <label>Room:
+      <input id="roomId" size="6" value="" readonly>
     </label>
+
+    <div class="invite-box">
+      <label style="flex:1;">
+        Invite link:
+        <input id="inviteLink" type="text" readonly>
+      </label>
+      <button id="btnCopyInvite" type="button">Copy</button>
+    </div>
+
     <label>Nome/Identity:
-      <input id="displayName" size="12" value="">
+      <input id="displayName" size="10" value="">
     </label>
+
     <button id="btnConnect">Connect &amp; Join Room</button>
     <button id="btnHangup" disabled>Hangup</button>
     <button id="btnToggleMic" disabled>Mic OFF</button>
     <button id="btnToggleCam" disabled>Cam OFF</button>
+
     <span class="badge">SFrame via wasm + MLS</span>
   </div>
 
@@ -276,6 +308,5 @@
 
   <!-- Carico SOLO appRoom.js: lui importa tutto il resto -->
   <script type="module" src="./appRoom.js"></script>
-
 </body>
 </html>

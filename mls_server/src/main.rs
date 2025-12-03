@@ -1,7 +1,8 @@
 // ─────────────────────────────────────────────────────────────
-// MLS SERVER – Export per SFrame WebApp + Roster endpoint
+// MLS SERVER – Export per SFrame WebApp + Roster endpoint (multi-room)
 // ─────────────────────────────────────────────────────────────
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use warp::Filter;
@@ -26,21 +27,29 @@ struct MemberEntry {
 #[derive(Debug, Deserialize)]
 struct JoinRequest {
     identity: String,
+    room_id: u32,
 }
 
 #[derive(Debug, Serialize)]
 struct JoinResponse {
     epoch: u64,
     group_id: String,
+    room_id: u32,
     master_secret: String,
     sender_index: u32,
     roster: Vec<MemberEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RosterQuery {
+    room_id: u32,
 }
 
 #[derive(Debug, Serialize)]
 struct RosterResponse {
     epoch: u64,
     group_id: String,
+    room_id: u32,
     roster: Vec<MemberEntry>,
 }
 
@@ -54,71 +63,70 @@ struct GroupState {
 
 #[derive(Clone)]
 struct Groups {
-    inner: Arc<Mutex<GroupState>>,
+    // room_id → stato MLS per quella stanza
+    inner: Arc<Mutex<HashMap<u32, GroupState>>>,
 }
 
-impl Default for Groups {
-    fn default() -> Self {
-        // Provider
-        let provider = OpenMlsRustCrypto::default();
-
-        // Ciphersuite
-        let ciphersuite =
-            Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519;
-
-        // Credenziale server
-        let cred = BasicCredential::new(b"server".to_vec());
-        let sig = SignatureKeyPair::new(ciphersuite.signature_algorithm())
-            .expect("signature keypair");
-
-        let credential_with_key = CredentialWithKey {
-            credential: cred.into(),
-            signature_key: sig.public().into(),
-        };
-
-        // Config
-        let config = MlsGroupCreateConfig::builder()
-            .use_ratchet_tree_extension(true)
-            .build();
-
-        // Crea gruppo con un solo membro (server)
-        let group = MlsGroup::new(
-            &provider,
-            &sig,
-            &config,
-            credential_with_key,
-        )
-        .expect("group create");
-
-        // Estrai master secret che useremo come base per SFrame
-        let master = group
-            .export_secret(provider.crypto(), "SFRAME_MASTER", &[], 32)
-            .expect("export master");
-
-        let epoch = group.epoch().as_u64();
-        let gid = group.group_id().to_vec();
-
-        // Roster iniziale: solo il server, index = 0
-        let roster = vec![
-            MemberEntry {
-                index: 0,
-                identity: "server".to_owned(),
-            }
-        ];
-
+impl Groups {
+    fn new() -> Self {
         Groups {
-            inner: Arc::new(Mutex::new(GroupState {
-                epoch,
-                master_secret: master,
-                group_id: gid,
-                roster,
-            })),
+            inner: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
 
+// helper: crea un nuovo gruppo MLS e ne estrae master_secret/epoch/group_id
+fn make_group_state() -> GroupState {
+    let provider = OpenMlsRustCrypto::default();
+
+    let ciphersuite =
+        Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519;
+
+    let cred = BasicCredential::new(b"server".to_vec());
+    let sig = SignatureKeyPair::new(ciphersuite.signature_algorithm())
+        .expect("signature keypair");
+
+    let credential_with_key = CredentialWithKey {
+        credential: cred.into(),
+        signature_key: sig.public().into(),
+    };
+
+    let config = MlsGroupCreateConfig::builder()
+        .use_ratchet_tree_extension(true)
+        .build();
+
+    let group = MlsGroup::new(
+        &provider,
+        &sig,
+        &config,
+        credential_with_key,
+    )
+    .expect("group create");
+
+    let master = group
+        .export_secret(provider.crypto(), "SFRAME_MASTER", &[], 32)
+        .expect("export master");
+
+    let epoch = group.epoch().as_u64();
+    let gid = group.group_id().to_vec();
+
+    let roster = vec![
+        MemberEntry {
+            index: 0,
+            identity: "server".to_owned(),
+        }
+    ];
+
+    GroupState {
+        epoch,
+        master_secret: master,
+        group_id: gid,
+        roster,
+    }
+}
+
 // ─────────────────────────────────────────────────────────────
-// HANDLER JOIN
+// HANDLER JOIN (POST /mls/join)
 // ─────────────────────────────────────────────────────────────
 
 async fn handle_join(
@@ -126,10 +134,18 @@ async fn handle_join(
     groups: Groups,
 ) -> Result<impl warp::Reply, warp::Rejection> {
 
-    let mut gs = groups.inner.lock().unwrap();
+    let JoinRequest { identity, room_id } = req;
 
-    // Se l'identity esiste già in roster, riusa lo stesso index
-    if let Some(existing) = gs.roster.iter().find(|m| m.identity == req.identity) {
+    let mut map = groups.inner.lock().unwrap();
+
+    // prendi (o crea) il gruppo per questa room
+    let gs = map.entry(room_id).or_insert_with(|| {
+        println!("[MLS] creating new group for room {}", room_id);
+        make_group_state()
+    });
+
+    // identity già presente in questa room? → riusa index
+    if let Some(existing) = gs.roster.iter().find(|m| m.identity == identity) {
         let master_b64 =
             base64::engine::general_purpose::STANDARD.encode(&gs.master_secret);
         let gid_hex = gs.group_id
@@ -140,24 +156,26 @@ async fn handle_join(
         let resp = JoinResponse {
             epoch: gs.epoch,
             group_id: gid_hex,
+            room_id,
             master_secret: master_b64,
             sender_index: existing.index,
             roster: gs.roster.clone(),
         };
 
         println!(
-            "[MLS] re-join identity={} → sender_index={}",
-            existing.identity, existing.index
+            "[MLS] re-join room={} identity={} → sender_index={}",
+            room_id, existing.identity, existing.index
         );
+
         return Ok(warp::reply::json(&resp));
     }
 
-    // Altrimenti è una nuova identity → assegna nuovo index
+    // nuova identity per questa room → assegna nuovo index
     let new_idx = gs.roster.len() as u32;
 
     gs.roster.push(MemberEntry {
         index: new_idx,
-        identity: req.identity.clone(),
+        identity: identity.clone(),
     });
 
     let master_b64 =
@@ -171,47 +189,68 @@ async fn handle_join(
     let resp = JoinResponse {
         epoch: gs.epoch,
         group_id: gid_hex,
+        room_id,
         master_secret: master_b64,
         sender_index: new_idx,
         roster: gs.roster.clone(),
     };
 
     println!(
-        "[MLS] new join identity={} → sender_index={}",
-        req.identity, new_idx
+        "[MLS] new join room={} identity={} → sender_index={}",
+        room_id, identity, new_idx
     );
 
     Ok(warp::reply::json(&resp))
 }
 
 // ─────────────────────────────────────────────────────────────
-// HANDLER ROSTER (GET /mls/roster)
+// HANDLER ROSTER (GET /mls/roster?room_id=1234)
 // ─────────────────────────────────────────────────────────────
 
 async fn handle_roster(
+    query: RosterQuery,
     groups: Groups,
 ) -> Result<impl warp::Reply, warp::Rejection> {
 
-    let gs = groups.inner.lock().unwrap();
+    let map = groups.inner.lock().unwrap();
 
-    let gid_hex = gs.group_id
-        .iter()
-        .map(|b| format!("{:02x}", b))
-        .collect::<String>();
+    if let Some(gs) = map.get(&query.room_id) {
+        let gid_hex = gs.group_id
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect::<String>();
 
-    let resp = RosterResponse {
-        epoch: gs.epoch,
-        group_id: gid_hex,
-        roster: gs.roster.clone(),
-    };
+        let resp = RosterResponse {
+            epoch: gs.epoch,
+            group_id: gid_hex,
+            room_id: query.room_id,
+            roster: gs.roster.clone(),
+        };
 
-    println!(
-        "[MLS] roster requested → epoch={}, members={}",
-        gs.epoch,
-        gs.roster.len()
-    );
+        println!(
+            "[MLS] roster requested room={} → epoch={}, members={}",
+            query.room_id,
+            gs.epoch,
+            gs.roster.len()
+        );
 
-    Ok(warp::reply::json(&resp))
+        Ok(warp::reply::json(&resp))
+    } else {
+        // room mai usata: roster vuoto
+        let resp = RosterResponse {
+            epoch: 0,
+            group_id: String::new(),
+            room_id: query.room_id,
+            roster: vec![],
+        };
+
+        println!(
+            "[MLS] roster requested room={} → NO GROUP (empty)",
+            query.room_id
+        );
+
+        Ok(warp::reply::json(&resp))
+    }
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -220,7 +259,7 @@ async fn handle_roster(
 
 #[tokio::main]
 async fn main() {
-    let groups = Groups::default();
+    let groups = Groups::new();
 
     let join_route = warp::path!("mls" / "join")
         .and(warp::post())
@@ -230,6 +269,7 @@ async fn main() {
 
     let roster_route = warp::path!("mls" / "roster")
         .and(warp::get())
+        .and(warp::query::<RosterQuery>())
         .and(with_groups(groups.clone()))
         .and_then(handle_roster);
 
