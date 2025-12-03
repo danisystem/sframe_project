@@ -60,16 +60,15 @@ nokhwa      = { version = "0.10.9", default-features = false, features = ["input
 ctrlc       = { version = "3", optional = true }
 simple_logger = { version = "5", optional = true }
 
-openmls = { git = "https://github.com/openmls/openmls", branch = "main", features=["std"] }
-openmls_rust_crypto = { git = "https://github.com/openmls/openmls", package = "openmls_rust_crypto" }
-openmls_basic_credential = { git = "https://github.com/openmls/openmls", package = "openmls_basic_credential" }
 env_logger = "0.11"
 tls_codec = "0.4"
 
 # ── Dipendenze SOLO per wasm ───────────────────────────────────────────────────
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-wasm-bindgen = "=0.2.105"
+wasm-bindgen = { version = "0.2.105", features = ["serde-serialize"] }
 # console_error_panic_hook = "0.1"   # opzionale per panics leggibili
+serde = { version = "1.0", features = ["derive"] }
+serde-wasm-bindgen = "0.6"
 
 [[bin]]
 name = "tx_audio"

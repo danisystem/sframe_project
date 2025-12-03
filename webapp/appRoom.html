@@ -92,15 +92,15 @@
 
     #localVideo {
       width: 100%;
-      max-width: 480px;        /* limite orizzontale */
-      aspect-ratio: 16 / 9;    /* proporzione fissa */
-      height: auto;            /* calcolata in base all'aspect-ratio */
+      max-width: 480px;
+      aspect-ratio: 16 / 9;
+      height: auto;
       background: #020617;
       border-radius: 12px;
       border: 1px solid #1f2937;
       object-fit: cover;
       display: block;
-      margin: 0 auto;          /* centra il video nel pannello */
+      margin: 0 auto;
     }
 
     .panel {
@@ -226,8 +226,8 @@
 </head>
 <body>
   <div class="topbar">
-    <label>WS URL:
-      <input id="wsUrl" size="28" value="ws://localhost:8188/">
+    <label>WSS URL:
+      <input id="wsUrl" size="28" value="wss://sframe.local/janus">
     </label>
     <label>Room ID:
       <input id="roomId" size="6" value="1234">

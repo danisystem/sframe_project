@@ -12,6 +12,7 @@ parking_lot = "0.12"
 base64 = "0.22"
 
 # OpenMLS tutti dalla STESSA repo e STESSO branch
-openmls = { git = "https://github.com/openmls/openmls", branch = "main" }
-openmls_basic_credential = { git = "https://github.com/openmls/openmls", branch = "main", package="openmls_basic_credential" }
-openmls_rust_crypto = { git = "https://github.com/openmls/openmls", branch = "main", package="openmls_rust_crypto" }
+openmls = { git = "https://github.com/openmls/openmls", rev = "0223a6ad" }
+openmls_basic_credential = { git = "https://github.com/openmls/openmls", rev = "0223a6ad", package = "openmls_basic_credential" }
+openmls_rust_crypto = { git = "https://github.com/openmls/openmls", rev = "0223a6ad", package = "openmls_rust_crypto" }
+

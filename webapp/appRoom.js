@@ -1,7 +1,8 @@
 // appRoom.js
-// ─────────────────────────────────────────────────────────────
-// Janus VideoRoom + SFrame + MLS – versione modulare
-// ─────────────────────────────────────────────────────────────
+// ------------------------------------------------------------
+// Janus VideoRoom + SFrame + MLS (versione aggiornata con
+// header debug TX/RX e supporto a sframe_last_tx/rx_header())
+// ------------------------------------------------------------
 
 // Carica WASM SFrame (espone window.SFRAME.WasmPeer, ecc.)
 import "./bootstrap_sframe.js";
@@ -10,7 +11,7 @@ import "./bootstrap_sframe.js";
 import { els, setConnectedUI } from "./ui.js";
 import { Output } from "./output.js";
 
-// MLS → segreti + mapping index/identity + KID
+// MLS → segreti + KID mapping
 import {
   mlsJoin,
   mlsFetchRoster,
@@ -21,17 +22,22 @@ import {
   parseIdentityWithIndex,
 } from "./mls_sframe_session.js";
 
-// Layer SFrame (wrapper attorno a WasmPeer di sframe_core)
+// Wrapper attorno a WasmPeer
 import {
   initSFrame,
   createTxPeer,
   createRxPeer,
 } from "./sframe_layer.js";
 
+// Funzioni WASM generate da wasm-bindgen (nuove!)
+import {
+  sframe_last_tx_header,
+  sframe_last_rx_header
+} from "./pkg/sframe_core.js";
 
-// ─────────────────────────────────────────────────────────────
+// ------------------------------------------------------------
 // Stato globale
-// ─────────────────────────────────────────────────────────────
+// ------------------------------------------------------------
 
 let ws = null;
 let sessionId = null;
@@ -40,20 +46,19 @@ let pcPub = null;
 let keepaliveTimer = null;
 let localStream = null;
 
-// Info MLS per questo peer:
+// Info MLS per questo peer
 // { sender_index, epoch, master_secret, roster }
 let mlsInfo = null;
 
-// Identity “base” (senza #index), usata anche per UI remote peers
+// Identity base (senza #index)
 let myIdentity = null;
 
 // feedId → {feedId, display, pc, rxPeer, videoEl, handleId}
 const subscribers = new Map();
 
-
-// ─────────────────────────────────────────────────────────────
+// ------------------------------------------------------------
 // Utilità
-// ─────────────────────────────────────────────────────────────
+// ------------------------------------------------------------
 
 function sendJanus(msg) {
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
@@ -81,7 +86,7 @@ function stopKeepalive() {
   keepaliveTimer = null;
 }
 
-// UI: lista “Remote peers”
+// Roster UI
 function renderRemotePeers(roster, identityMe) {
   const box = document.getElementById("remotePeers");
   if (!box) return;
@@ -98,11 +103,8 @@ function renderRemotePeers(roster, identityMe) {
   });
 }
 
-// Chiede al backend MLS il roster aggiornato e refresh della UI
 async function refreshRosterUI() {
-  // se non sappiamo ancora chi siamo, non ha senso
   if (!myIdentity) return;
-
   try {
     const r = await mlsFetchRoster();
     renderRemotePeers(r.roster, myIdentity);
@@ -111,10 +113,9 @@ async function refreshRosterUI() {
   }
 }
 
-
-// ─────────────────────────────────────────────────────────────
-// WS → Janus
-// ─────────────────────────────────────────────────────────────
+// ------------------------------------------------------------
+// WebSocket → Janus
+// ------------------------------------------------------------
 
 function onJanusMessage(evt) {
   let msg;
@@ -134,10 +135,9 @@ function onJanusMessage(evt) {
   if (janus === "error") return Output.error("Janus Error", msg.error);
 }
 
-
-// ─────────────────────────────────────────────────────────────
+// ------------------------------------------------------------
 // SUCCESS
-// ─────────────────────────────────────────────────────────────
+// ------------------------------------------------------------
 
 function handleSuccess(msg) {
   const { transaction, data } = msg;
@@ -155,7 +155,6 @@ function handleSuccess(msg) {
   if (transaction?.startsWith("attach-pub-")) {
     pluginHandlePub = data.id;
     Output.janus("Publisher handle", pluginHandlePub);
-    // join MLS + VideoRoom (async)
     joinAsPublisher();
     return;
   }
@@ -171,10 +170,9 @@ function handleSuccess(msg) {
   }
 }
 
-
-// ─────────────────────────────────────────────────────────────
+// ------------------------------------------------------------
 // EVENT
-// ─────────────────────────────────────────────────────────────
+// ------------------------------------------------------------
 
 function handleEvent(msg) {
   const { sender, plugindata, jsep } = msg;
@@ -183,28 +181,21 @@ function handleEvent(msg) {
   const data = plugindata.data || {};
   const vr = data.videoroom;
 
-  // Eventi per il nostro Publisher
+  // Eventi Publisher
   if (sender === pluginHandlePub) {
-
     if (vr === "joined") {
       Output.janus("Joined as publisher", data.id);
 
-      // publisher già presenti
       if (Array.isArray(data.publishers)) {
         data.publishers.forEach(p => subscribeToPublisher(p.id, p.display));
       }
 
-      // roster iniziale (dal punto di vista di chi entra ora)
       refreshRosterUI().catch(() => {});
-
       startPublishing();
     }
 
     if (vr === "event" && Array.isArray(data.publishers)) {
-      // nuovi publisher che entrano
       data.publishers.forEach(p => subscribeToPublisher(p.id, p.display));
-
-      // aggiorna roster ovunque (anche sul peer che era già dentro)
       refreshRosterUI().catch(() => {});
     }
 
@@ -217,7 +208,7 @@ function handleEvent(msg) {
     return;
   }
 
-  // Eventi per i Subscriber
+  // Eventi Subscriber
   for (const [feedId, sub] of subscribers.entries()) {
     if (sub.handleId === sender) {
       if (jsep) handleSubscriberJsep(feedId, sub, jsep);
@@ -226,10 +217,9 @@ function handleEvent(msg) {
   }
 }
 
-
-// ─────────────────────────────────────────────────────────────
+// ------------------------------------------------------------
 // Publisher
-// ─────────────────────────────────────────────────────────────
+// ------------------------------------------------------------
 
 function attachPublisherHandle() {
   sendJanus({
@@ -240,25 +230,19 @@ function attachPublisherHandle() {
   });
 }
 
-// Join come publisher: MLS JOIN → identity#sender_index → join Janus
 async function joinAsPublisher() {
   const room = Number(els.roomId.value) || 1234;
 
-  // Identity base per questo peer (senza #index MLS)
   myIdentity =
     els.displayName.value.trim() || ("user-" + crypto.randomUUID());
 
   try {
-    // 1) MLS JOIN (se non già fatto)
     if (!mlsInfo) {
       mlsInfo = await mlsJoin(myIdentity);
       Output.mls("MLS JOIN OK", mlsInfo);
-
-      // aggiorna subito la lista “Remote peers” con il roster attuale
       renderRemotePeers(mlsInfo.roster, myIdentity);
     }
 
-    // 2) Identity per Janus = "nome#sender_index"
     const fullIdentity = attachIndexToIdentity(
       myIdentity,
       mlsInfo.sender_index
@@ -266,7 +250,6 @@ async function joinAsPublisher() {
 
     Output.ui("Join as publisher", { room, identity: fullIdentity });
 
-    // 3) Join VideoRoom
     sendJanus({
       janus: "message",
       transaction: makeTxId("join-pub"),
@@ -288,31 +271,24 @@ async function joinAsPublisher() {
 
 async function startPublishing() {
   try {
-    // safety: se per qualche motivo mlsInfo non c'è, rifacciamo join
     if (!mlsInfo) {
       myIdentity =
         els.displayName.value.trim() || ("user-" + crypto.randomUUID());
       mlsInfo = await mlsJoin(myIdentity);
       Output.mls("MLS JOIN (late) OK", mlsInfo);
-
-      // aggiorna lista anche qui
       renderRemotePeers(mlsInfo.roster, myIdentity);
     }
 
-    // Init SFrame WASM
     await initSFrame();
 
-    // TX key derivata via MLS (singola chiave per audio+video)
     const selfIndex = mlsInfo.sender_index;
     const txKey = await deriveTxKey(mlsInfo.master_secret, selfIndex);
 
-    // KID TX (audio/video) per questo peer.
     const kidAudio = computeKid(mlsInfo.epoch, selfIndex);
     const kidVideo = kidAudio + 1;
 
     const txPeer = createTxPeer(kidAudio, kidVideo, txKey);
 
-    // WebRTC
     pcPub = new RTCPeerConnection({ iceServers: [] });
 
     pcPub.onicecandidate = ev => {
@@ -335,19 +311,13 @@ async function startPublishing() {
       });
     };
 
-    // Media locale
     localStream = await navigator.mediaDevices.getUserMedia({
       audio: { echoCancellation: true },
-      video: {
-        width: { ideal: 640 },
-        height: { ideal: 360 },
-        frameRate: { ideal: 20, max: 25 },
-      },
+      video: { width: { ideal: 640 }, height: { ideal: 360 }, frameRate: { ideal: 20, max: 25 } },
     });
 
     els.localVideo.srcObject = localStream;
 
-    // Aggiungi tracce + trasformazioni SFrame TX
     const aTrack = localStream.getAudioTracks()[0];
     if (aTrack) {
       const s = pcPub.addTrack(aTrack, localStream);
@@ -359,6 +329,7 @@ async function startPublishing() {
       const s = pcPub.addTrack(vTrack, localStream);
       attachSenderTransform(s, "video", txPeer);
     }
+
 
     const offer = await pcPub.createOffer();
     await pcPub.setLocalDescription(offer);
@@ -383,10 +354,9 @@ async function startPublishing() {
   }
 }
 
-
-// ─────────────────────────────────────────────────────────────
-// Sender Transform (TX)
-// ─────────────────────────────────────────────────────────────
+// ------------------------------------------------------------
+// Sender Transform
+// ------------------------------------------------------------
 
 function attachSenderTransform(sender, kind, txPeer) {
   if (!sender.createEncodedStreams) return;
@@ -396,13 +366,28 @@ function attachSenderTransform(sender, kind, txPeer) {
   const transform = new TransformStream({
     transform(chunk, controller) {
       try {
-        const u8 = new Uint8Array(chunk.data);
+        const input = new Uint8Array(chunk.data);
+
         const out =
           kind === "audio"
-            ? txPeer.encrypt_audio(u8)
-            : txPeer.encrypt_video(u8);
-        chunk.data = out.buffer;
+            ? txPeer.encrypt_audio(input)
+            : txPeer.encrypt_video(input);
+
+        const out_u8 = new Uint8Array(out);
+
+        // 🔥 header debug
+        try {
+          const hdr = sframe_last_tx_header();
+          if (hdr && hdr !== undefined) {
+            Output.sframeHeader("TX", kind, hdr);
+          }
+        } catch (e) {
+          Output.error("sframe TX hdr", e);
+        }
+
+        chunk.data = out_u8.buffer;
         controller.enqueue(chunk);
+
       } catch (e) {
         Output.error("TX encrypt", e);
         controller.enqueue(chunk);
@@ -413,17 +398,16 @@ function attachSenderTransform(sender, kind, txPeer) {
   readable.pipeThrough(transform).pipeTo(writable);
 }
 
-
-// ─────────────────────────────────────────────────────────────
+// ------------------------------------------------------------
 // Subscriber
-// ─────────────────────────────────────────────────────────────
+// ------------------------------------------------------------
 
 function subscribeToPublisher(feedId, display) {
   if (subscribers.has(feedId)) return;
 
   subscribers.set(feedId, {
     feedId,
-    display,   // es. "nome#senderIndex"
+    display,
     pc: null,
     handleId: null,
     rxPeer: null,
@@ -509,31 +493,21 @@ async function handleSubscriberJsep(feedId, sub, jsep) {
 
     await sub.pc.setRemoteDescription(new RTCSessionDescription(jsep));
 
-    // ───── MLS + SFrame RX: derive chiave RX e KID per questo sender remoto ─────
+    // MLS per RX
     if (!mlsInfo) {
       Output.error("MLS not initialized for subscriber", {});
       return;
     }
 
-    // display è "nome#senderIndex"
-    const { identity: remoteName, senderIndex: remoteIndex } =
+    const { identity, senderIndex } =
       parseIdentityWithIndex(sub.display);
 
-    if (remoteIndex == null) {
-      Output.error("MLS: sender_index missing in remote display", {
-        display: sub.display,
-        remoteName,
-      });
-      return;
-    }
-
-    const rxKey = await deriveRxKey(mlsInfo.master_secret, remoteIndex);
-    const kidAudio = computeKid(mlsInfo.epoch, remoteIndex);
+    const rxKey = await deriveRxKey(mlsInfo.master_secret, senderIndex);
+    const kidAudio = computeKid(mlsInfo.epoch, senderIndex);
     const kidVideo = kidAudio + 1;
 
     sub.rxPeer = createRxPeer(99, 98, kidAudio, kidVideo, rxKey);
 
-    // Attacca trasformazioni RX
     sub.pc.getReceivers().forEach(r => {
       if (r.track.kind === "audio") attachReceiverTransform(r, "audio", sub);
       if (r.track.kind === "video") attachReceiverTransform(r, "video", sub);
@@ -556,10 +530,9 @@ async function handleSubscriberJsep(feedId, sub, jsep) {
   }
 }
 
-
-// ─────────────────────────────────────────────────────────────
-// Receiver Transform (RX)
-// ─────────────────────────────────────────────────────────────
+// ------------------------------------------------------------
+// Receiver Transform
+// ------------------------------------------------------------
 
 function attachReceiverTransform(receiver, kind, sub) {
   if (!receiver.createEncodedStreams) return;
@@ -569,13 +542,26 @@ function attachReceiverTransform(receiver, kind, sub) {
   const transform = new TransformStream({
     transform(chunk, controller) {
       try {
-        const u8 = new Uint8Array(chunk.data);
+        const input = new Uint8Array(chunk.data);
+
         const out =
           kind === "audio"
-            ? sub.rxPeer.decrypt_audio(u8)
-            : sub.rxPeer.decrypt_video(u8);
-        chunk.data = out.buffer;
+            ? sub.rxPeer.decrypt_audio(input)
+            : sub.rxPeer.decrypt_video(input);
+
+        // 🔥 header RX
+        try {
+          const hdr = sframe_last_rx_header();
+          if (hdr && hdr !== undefined) {
+            Output.sframeHeader("RX", kind, hdr);
+          }
+        } catch (e) {
+          Output.error("sframe RX hdr", e);
+        }
+
+        chunk.data = new Uint8Array(out).buffer;
         controller.enqueue(chunk);
+
       } catch (e) {
         Output.error("RX decrypt", e);
         controller.enqueue(chunk);
@@ -586,28 +572,23 @@ function attachReceiverTransform(receiver, kind, sub) {
   readable.pipeThrough(transform).pipeTo(writable);
 }
 
-
-// ─────────────────────────────────────────────────────────────
-// Cleanup & subscriber removal
-// ─────────────────────────────────────────────────────────────
+// ------------------------------------------------------------
+// Cleanup
+// ------------------------------------------------------------
 
 function removeSubscriber(feedId) {
   const sub = subscribers.get(feedId);
   if (!sub) return;
 
-  try {
-    if (sub.pc) sub.pc.close();
-  } catch {}
-
+  try { if (sub.pc) sub.pc.close(); } catch {}
   if (sub.videoEl && sub.videoEl.parentNode) {
     sub.videoEl.parentNode.remove();
   }
-
   subscribers.delete(feedId);
 }
 
 function connectAndJoinRoom() {
-  const url = "wss://sframe.local/janus";
+  const url = els.wsUrl.value || "wss://sframe.local/janus";
 
   ws = new WebSocket(url, "janus-protocol");
 
@@ -624,7 +605,6 @@ function connectAndJoinRoom() {
 
   setConnectedUI(true);
 }
-
 
 function hangup() {
   try {
@@ -646,7 +626,7 @@ function hangup() {
 function cleanup() {
   stopKeepalive();
 
-  if (pcPub) try { pcPub.close(); } catch {}
+  try { if (pcPub) pcPub.close(); } catch {}
   pcPub = null;
 
   if (localStream) localStream.getTracks().forEach(t => t.stop());
@@ -654,12 +634,11 @@ function cleanup() {
   els.localVideo.srcObject = null;
 
   subscribers.forEach(sub => {
-    if (sub.pc) try { sub.pc.close(); } catch {}
+    try { if (sub.pc) sub.pc.close(); } catch {}
   });
   subscribers.clear();
   els.remoteVideos.innerHTML = "";
 
-  // pulisco anche la lista dei remote peers
   const box = document.getElementById("remotePeers");
   if (box) box.innerHTML = "";
 
@@ -671,10 +650,9 @@ function cleanup() {
   setConnectedUI(false);
 }
 
-
-// ─────────────────────────────────────────────────────────────
-// Mic / Cam
-// ─────────────────────────────────────────────
+// ------------------------------------------------------------
+// UI
+// ------------------------------------------------------------
 
 function toggleMic() {
   if (!localStream) return;
@@ -692,11 +670,7 @@ function toggleCam() {
   els.btnToggleCam.textContent = t.enabled ? "Cam OFF" : "Cam ON";
 }
 
-
-// ─────────────────────────────────────────────────────────────
 // Bind UI
-// ─────────────────────────────────────────────────────────────
-
 els.btnConnect.addEventListener("click", connectAndJoinRoom);
 els.btnHangup.addEventListener("click", hangup);
 els.btnToggleMic.addEventListener("click", toggleMic);

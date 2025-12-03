@@ -30,6 +30,71 @@ function getStringFromWasm0(ptr, len) {
     return decodeText(ptr, len);
 }
 
+function debugString(val) {
+    // primitive types
+    const type = typeof val;
+    if (type == 'number' || type == 'boolean' || val == null) {
+        return  `${val}`;
+    }
+    if (type == 'string') {
+        return `"${val}"`;
+    }
+    if (type == 'symbol') {
+        const description = val.description;
+        if (description == null) {
+            return 'Symbol';
+        } else {
+            return `Symbol(${description})`;
+        }
+    }
+    if (type == 'function') {
+        const name = val.name;
+        if (typeof name == 'string' && name.length > 0) {
+            return `Function(${name})`;
+        } else {
+            return 'Function';
+        }
+    }
+    // objects
+    if (Array.isArray(val)) {
+        const length = val.length;
+        let debug = '[';
+        if (length > 0) {
+            debug += debugString(val[0]);
+        }
+        for(let i = 1; i < length; i++) {
+            debug += ', ' + debugString(val[i]);
+        }
+        debug += ']';
+        return debug;
+    }
+    // Test for built-in
+    const builtInMatches = /\[object ([^\]]+)\]/.exec(toString.call(val));
+    let className;
+    if (builtInMatches && builtInMatches.length > 1) {
+        className = builtInMatches[1];
+    } else {
+        // Failed to match the standard '[object ClassName]'
+        return toString.call(val);
+    }
+    if (className == 'Object') {
+        // we're a user defined class or Object
+        // JSON.stringify avoids problems with cycles, and is generally much
+        // easier than looping through ownProperties of `val`.
+        try {
+            return 'Object(' + JSON.stringify(val) + ')';
+        } catch (_) {
+            return 'Object';
+        }
+    }
+    // errors
+    if (val instanceof Error) {
+        return `${val.name}: ${val.message}\n${val.stack}`;
+    }
+    // TODO we could test for more things here, like `Set`s and `Map`s.
+    return className;
+}
+
 let WASM_VECTOR_LEN = 0;
 
 const cachedTextEncoder = new TextEncoder();
@@ -84,6 +149,30 @@ function passStringToWasm0(arg, malloc, realloc) {
     return ptr;
 }
 
+let cachedDataViewMemory0 = null;
+
+function getDataViewMemory0() {
+    if (cachedDataViewMemory0 === null || cachedDataViewMemory0.buffer.detached === true || (cachedDataViewMemory0.buffer.detached === undefined && cachedDataViewMemory0.buffer !== wasm.memory.buffer)) {
+        cachedDataViewMemory0 = new DataView(wasm.memory.buffer);
+    }
+    return cachedDataViewMemory0;
+}
+/**
+ * @returns {any}
+ */
+export function sframe_last_tx_header() {
+    const ret = wasm.sframe_last_tx_header();
+    return ret;
+}
+
+/**
+ * @returns {any}
+ */
+export function sframe_last_rx_header() {
+    const ret = wasm.sframe_last_rx_header();
+    return ret;
+}
+
 function isLikeNone(x) {
     return x === undefined || x === null;
 }
@@ -106,7 +195,6 @@ function getArrayU8FromWasm0(ptr, len) {
     return getUint8ArrayMemory0().subarray(ptr / 1, ptr / 1 + len);
 }
 /**
- * Analisi compatta di un pacchetto SFrame (solo header, no plaintext)
  * @param {Uint8Array} packet
  * @returns {string}
  */
@@ -134,9 +222,7 @@ export function sframe_inspect(packet) {
 const WasmPeerFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_wasmpeer_free(ptr >>> 0, 1));
-/**
- * Rappresenta un peer con 4 chiavi distinte (audio/video per TX e RX)
- */
+
 export class WasmPeer {
 
     static __wrap(ptr) {
@@ -159,7 +245,6 @@ export class WasmPeer {
         wasm.__wbg_wasmpeer_free(ptr, 0);
     }
     /**
-     * Costruttore originale (2 keyId condivisi TX/RX)
      * @param {number} key_audio
      * @param {number} key_video
      * @param {string | null | undefined} suite
@@ -179,13 +264,6 @@ export class WasmPeer {
         return this;
     }
     /**
-     * 🔄 Nuovo costruttore full-duplex (4 keyId indipendenti)
-     *
-     * # Argomenti
-     * - `tx_audio`, `tx_video`: keyId usati per cifrare i frame locali
-     * - `rx_audio`, `rx_video`: keyId usati per decifrare i frame remoti
-     * - `suite`: opzionale ("aes-gcm128-sha256" o default aes-gcm256-sha512)
-     * - `secret`: materiale condiviso (salt/psk)
      * @param {number} tx_audio
      * @param {number} tx_video
      * @param {number} rx_audio
@@ -306,12 +384,40 @@ async function __wbg_load(module, imports) {
 function __wbg_get_imports() {
     const imports = {};
     imports.wbg = {};
+    imports.wbg.__wbg_Error_e83987f665cf5504 = function(arg0, arg1) {
+        const ret = Error(getStringFromWasm0(arg0, arg1));
+        return ret;
+    };
+    imports.wbg.__wbg___wbindgen_debug_string_df47ffb5e35e6763 = function(arg0, arg1) {
+        const ret = debugString(arg1);
+        const ptr1 = passStringToWasm0(ret, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        getDataViewMemory0().setInt32(arg0 + 4 * 1, len1, true);
+        getDataViewMemory0().setInt32(arg0 + 4 * 0, ptr1, true);
+    };
     imports.wbg.__wbg___wbindgen_throw_b855445ff6a94295 = function(arg0, arg1) {
         throw new Error(getStringFromWasm0(arg0, arg1));
+    };
+    imports.wbg.__wbg_new_1acc0b6eea89d040 = function() {
+        const ret = new Object();
+        return ret;
+    };
+    imports.wbg.__wbg_set_3f1d0b984ed272ed = function(arg0, arg1, arg2) {
+        arg0[arg1] = arg2;
     };
     imports.wbg.__wbindgen_cast_2241b6af4c4b2941 = function(arg0, arg1) {
         // Cast intrinsic for `Ref(String) -> Externref`.
         const ret = getStringFromWasm0(arg0, arg1);
+        return ret;
+    };
+    imports.wbg.__wbindgen_cast_4625c577ab2ec9ee = function(arg0) {
+        // Cast intrinsic for `U64 -> Externref`.
+        const ret = BigInt.asUintN(64, arg0);
+        return ret;
+    };
+    imports.wbg.__wbindgen_cast_d6cd19b81560fd6e = function(arg0) {
+        // Cast intrinsic for `F64 -> Externref`.
+        const ret = arg0;
         return ret;
     };
     imports.wbg.__wbindgen_init_externref_table = function() {
@@ -331,6 +437,7 @@ function __wbg_get_imports() {
 function __wbg_finalize_init(instance, module) {
     wasm = instance.exports;
     __wbg_init.__wbindgen_wasm_module = module;
+    cachedDataViewMemory0 = null;
     cachedUint8ArrayMemory0 = null;
 
 
