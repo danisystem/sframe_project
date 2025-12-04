@@ -4,9 +4,9 @@
 import { hkdf } from "./hkdf.js";
 import { Output } from "./output.js";
 
-// Backend MLS rust (warp) – usa l'IP/hostname che stai già usando
-const SERVER_JOIN_URL   = "http://127.0.0.1:3000/mls/join";
-const SERVER_ROSTER_URL = "http://127.0.0.1:3000/mls/roster";
+// Usiamo path relativi: ci pensa secure.server.js a fare da proxy verso 127.0.0.1:3000
+const SERVER_JOIN_PATH   = "/mls/join";
+const SERVER_ROSTER_PATH = "/mls/roster";
 
 function base64ToBytes(b64) {
   if (typeof b64 !== "string") {
@@ -21,15 +21,16 @@ function base64ToBytes(b64) {
 // ---------------- MLS JOIN ----------------
 //
 // Ogni join ora è per (room_id, identity):
-//   - room_id = Room Janus (es. 1234)
-//   - identity = "dan", "mac", ecc.
+//   - room_id   = Room Janus (es. 123456)
+//   - identity  = "dani", "mac", ecc.
 
 export async function mlsJoin(identity, roomId) {
   Output.mls("JOIN →", { identity, roomId });
 
-  const resp = await fetch(SERVER_JOIN_URL, {
+  const resp = await fetch(SERVER_JOIN_PATH, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
+    // ⚠️ campo che il server Rust si aspetta: room_id
     body: JSON.stringify({ identity, room_id: roomId }),
   });
 
@@ -54,11 +55,10 @@ export async function mlsJoin(identity, roomId) {
 
 // ---------------- MLS ROSTER (refresh) ----------------
 //
-// Usata per aggiornare la lista dei peer nella room corrente.
-// GET /mls/roster?room_id=1234
+// GET /mls/roster?room_id=123456
 
 export async function mlsFetchRoster(roomId) {
-  const url = `${SERVER_ROSTER_URL}?room_id=${encodeURIComponent(roomId)}`;
+  const url = `${SERVER_ROSTER_PATH}?room_id=${encodeURIComponent(roomId)}`;
 
   const resp = await fetch(url, {
     method: "GET",
@@ -74,10 +74,6 @@ export async function mlsFetchRoster(roomId) {
 }
 
 // ---------------- Derivazione chiavi ----------------
-//
-// Per ogni sender_index usiamo la stessa label,
-// la separazione tra room avviene già perché il master_secret
-// è diverso per ogni room.
 
 function labelForSender(senderIndex) {
   return `sframe/sender/${senderIndex}`;
@@ -97,23 +93,12 @@ export async function deriveRxKey(master, remoteSenderIndex) {
   return key;
 }
 
-// ---------------- KID univoci (room + epoch + sender) ----------------
-//
-// computeKid(epoch, roomId, senderIndex):
-//   - epoch nei "blocchi" grandi
-//   - roomId in un blocco intermedio
-//   - senderIndex in quello piccolo
-//
-// Audio = kidAudio
-// Video = kidAudio + 1
-//
-// NOTE: Manteniamo i range sotto 2^53 per non avere problemi
-//       con i Number JS.
+// ---------------- KID univoci (epoch + room + sender) ----------------
 
 export function computeKid(epoch, roomId, senderIndex) {
-  const e = Number(epoch) >>> 0;       // epoch MLS (per ora sempre 0)
-  const r = Number(roomId) >>> 0;      // Janus room
-  const s = Number(senderIndex) >>> 0; // MLS sender_index
+  const e = Number(epoch) >>> 0;
+  const r = Number(roomId) >>> 0;
+  const s = Number(senderIndex) >>> 0;
 
   // layout: [ epoch | roomId | senderIndex | mediaBit ]
   // epoch * 1e9  + room * 1e4 + sender * 10
@@ -122,9 +107,6 @@ export function computeKid(epoch, roomId, senderIndex) {
 }
 
 // ---------------- Identity helper ----------------
-//
-// "nome#index" per poter recuperare il sender_index
-// direttamente dal display Janus.
 
 export function attachIndexToIdentity(name, senderIndex) {
   return `${name}#${senderIndex}`;

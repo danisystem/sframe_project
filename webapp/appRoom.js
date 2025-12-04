@@ -52,6 +52,15 @@ const subscribers = new Map();
 // ─────────────────────────────────────────────────────────────
 // Utilità generali
 // ─────────────────────────────────────────────────────────────
+function isProbablySFramePacket(u8) {
+  // 1) SFrame non può essere così corto
+  if (u8.length < 20) return false;
+
+  // 2) Il primo byte di header deve avere MSB = 1
+  if ((u8[0] & 0x80) === 0) return false;
+
+  return true;
+}
 
 function sendJanus(msg) {
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
@@ -462,6 +471,59 @@ async function startPublishing() {
   }
 }
 
+
+// ─────────────────────────────────────────────────────────────
+// Helper: ispezione header SFrame per logging
+// ─────────────────────────────────────────────────────────────
+
+function inspectSframePacket(direction, kind, buf) {
+  // buf è un Uint8Array con il pacchetto SFrame cifrato
+  if (!buf || buf.length < 3) return;
+
+  // Byte 0: versione + info lunghezze (per i nostri parametri è sufficiente)
+  const h0 = buf[0];
+
+  // Nei nostri test:
+  //  - key-id è sempre su 1 byte
+  //  - la lunghezza del contatore è codificata negli ultimi 2 bit di h0
+  const kid_len_bytes = 1;
+  const ctr_len_bytes = (h0 & 0x03) + 1; // 0 -> 1 byte, 1 -> 2 byte, ...
+
+  const header_len = 1 + kid_len_bytes + ctr_len_bytes;
+
+  if (buf.length < header_len) return;
+
+  const kid = buf[1];
+
+  let ctr = 0;
+  for (let i = 0; i < ctr_len_bytes; i++) {
+    ctr = (ctr << 8) | buf[2 + i];
+  }
+
+  const total_len = buf.length;
+  const tag_len = total_len > header_len ? 16 : 0; // usiamo sempre GCM → 16B
+  const body = total_len - header_len;
+  const ct_len = body >= tag_len ? (body - tag_len) : body;
+  const aad_len = header_len;
+
+  const header_hex = Array.from(buf.slice(0, header_len))
+    .map(b => b.toString(16).padStart(2, "0"))
+    .join("");
+
+  Output.sframeHeader(direction, kind, {
+    kid,
+    kid_len_bytes,
+    ctr,
+    ctr_len_bytes,
+    aad_len,
+    ct_len,
+    tag_len,
+    total_len,
+    header_hex,
+  });
+}
+
+
 // ─────────────────────────────────────────────────────────────
 // Sender Transform (TX)
 // ─────────────────────────────────────────────────────────────
@@ -475,10 +537,15 @@ function attachSenderTransform(sender, kind, txPeer) {
     async transform(chunk, controller) {
       try {
         const u8 = new Uint8Array(chunk.data);
+
         const out =
           kind === "audio"
             ? txPeer.encrypt_audio(u8)
             : txPeer.encrypt_video(u8);
+
+        // 🔍 Log header SFrame sul pacchetto cifrato (se il log è ON)
+        inspectSframePacket("TX", kind, out);
+
         chunk.data = out.buffer;
         controller.enqueue(chunk);
       } catch (e) {
@@ -491,12 +558,22 @@ function attachSenderTransform(sender, kind, txPeer) {
   readable.pipeThrough(transform).pipeTo(writable);
 }
 
+
 // ─────────────────────────────────────────────────────────────
 // Subscriber
 // ─────────────────────────────────────────────────────────────
 
 function subscribeToPublisher(feedId, display) {
+  // Se abbiamo già questo feedId, non fare nulla
   if (subscribers.has(feedId)) return;
+
+  // 🔁 Deduplica per identity: se esiste già un subscriber
+  // con lo stesso display (es. "dani#1"), lo rimuoviamo.
+  for (const [fid, sub] of subscribers.entries()) {
+    if (sub.display === display && fid !== feedId) {
+      removeSubscriber(fid);
+    }
+  }
 
   subscribers.set(feedId, {
     feedId,
@@ -652,13 +729,24 @@ function attachReceiverTransform(receiver, kind, sub) {
     async transform(chunk, controller) {
       try {
         const u8 = new Uint8Array(chunk.data);
+
+        // 🔥  FIX: se non sembra un pacchetto SFrame, NON proviamo a decriptarlo
+        if (!isProbablySFramePacket(u8)) {
+          controller.enqueue(chunk); 
+          return;
+        }
+
+        // 🔥 Decriptiamo solo i pacchetti veri SFrame
         const out =
           kind === "audio"
             ? sub.rxPeer.decrypt_audio(u8)
             : sub.rxPeer.decrypt_video(u8);
+
         chunk.data = out.buffer;
         controller.enqueue(chunk);
+
       } catch (e) {
+        // se la decrypt fallisce, NON blocchiamo lo stream
         Output.error("RX decrypt", e);
         controller.enqueue(chunk);
       }
@@ -667,6 +755,7 @@ function attachReceiverTransform(receiver, kind, sub) {
 
   readable.pipeThrough(transform).pipeTo(writable);
 }
+
 
 // ─────────────────────────────────────────────────────────────
 // Cleanup & subscriber removal
