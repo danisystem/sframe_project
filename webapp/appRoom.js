@@ -3,9 +3,6 @@
 // Janus VideoRoom + SFrame + MLS – multi-room con invite link
 // ─────────────────────────────────────────────────────────────
 
-// Carica WASM SFrame (espone window.SFRAME.WasmPeer, ecc.)
-import "./bootstrap_sframe.js";
-
 // Moduli UI / log
 import { els, setConnectedUI, isSFrameLogEnabled } from "./ui.js";
 import { Output } from "./output.js";

@@ -12,7 +12,10 @@ function base64ToBytes(b64) {
     if (typeof b64 !== "string") {
         throw new Error("base64ToBytes: input non è una stringa");
     }
-    const bin = atob(b64);
+    // FIX: Supporto per Base64URL (sostituisce - con + e _ con /)
+    // Così se il server Rust manda stringhe "URL safe", atob non va in crash.
+    const standardB64 = b64.replace(/-/g, '+').replace(/_/g, '/');
+    const bin = atob(standardB64);
     const buf = new Uint8Array(bin.length);
     for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
     return buf;
@@ -64,20 +67,9 @@ export async function mlsJoin(identity, roomId) {
 // - vogliamo sapere se l'epoch MLS è avanzata e, in tal caso,
 //   aggiornare master_secret + epoch + roster.
 //
-// Implementazione NON distruttiva:
-// - internamente richiamiamo semplicemente /mls/join con la stessa
-//   identity e roomId
-// - il server MLS, una volta aggiornato, dovrà restituire lo stato
-//   dell'epoch corrente (eventualmente ruotato)
-// - se l'epoch è cambiata rispetto a currentInfo.epoch, ritorniamo
-//   changed: true e il nuovo info
-//
-// Uso previsto (in appRoom.js, in futuro):
-// const { changed, info } = await mlsResync(identity, roomId, mlsInfo);
-// if (changed) {
-//   mlsInfo = info;
-//   // rigenera txPeer/rxPeer + KID usando il nuovo master_secret/epoch
-// }
+// NOTA BENE: Il server MLS (Rust) DEVE essere idempotente per questa route.
+// Se identity è già nella stanza, non deve creare cloni ma solo restituire
+// lo stato aggiornato dell'epoch.
 export async function mlsResync(identity, roomId, currentInfo) {
     // Se non abbiamo ancora un currentInfo, comportati come un join "normale"
     if (!currentInfo) {
@@ -150,9 +142,12 @@ export async function deriveRxKey(master, remoteSenderIndex) {
 // i nuovi KID derivati da questa funzione saranno automaticamente
 // diversi dai precedenti, garantendo separazione tra epoch.
 export function computeKid(epoch, roomId, senderIndex) {
-    const e = Number(epoch) >>> 0;
-    const r = Number(roomId) >>> 0;
-    const s = Number(senderIndex) >>> 0;
+    // FIX: Rimosso il `>>> 0` per evitare overflow a 32 bit.
+    // I numeri JavaScript standard reggono fino a 9*10^15, quindi 
+    // anche con stanze a 6 cifre ed epoch alte non andrà mai in overflow.
+    const e = Number(epoch);
+    const r = Number(roomId);
+    const s = Number(senderIndex);
 
     // layout: [ epoch | roomId | senderIndex | mediaBit ]
     // epoch * 1e9 + room * 1e4 + sender * 10

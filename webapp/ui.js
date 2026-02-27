@@ -62,7 +62,8 @@ if (els.btnSframeLog) {
 /**
  * Aggiorna lo stato della UI in base alla connessione:
  * - connected = true: disabilita "Connect", abilita "Hangup" e mic/cam
- * - connected = false: resetta testo bottoni mic/cam e pulisce il log.
+ * - connected = false: resetta testo bottoni mic/cam e disabilita controlli.
+ * (I log non vengono più cancellati per permettere il debug post-disconnessione).
  */
 export function setConnectedUI(connected) {
   if (els.btnConnect) els.btnConnect.disabled = connected;
@@ -73,6 +74,7 @@ export function setConnectedUI(connected) {
   if (!connected) {
     if (els.btnToggleMic) els.btnToggleMic.textContent = "Mic OFF";
     if (els.btnToggleCam) els.btnToggleCam.textContent = "Cam OFF";
-    if (els.log) els.log.value = "";
+    // FIX: Rimossa la pulizia automatica di els.log.value = "" 
+    // per non perdere lo storico di eventuali errori!
   }
 }

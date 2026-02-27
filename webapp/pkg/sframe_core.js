@@ -197,8 +197,8 @@ export class WasmPeer {
         wasm.__wbg_wasmpeer_free(ptr, 0);
     }
     /**
-     * @param {number} key_audio
-     * @param {number} key_video
+     * @param {bigint} key_audio
+     * @param {bigint} key_video
      * @param {string | null | undefined} suite
      * @param {Uint8Array} secret
      */
@@ -216,10 +216,10 @@ export class WasmPeer {
         return this;
     }
     /**
-     * @param {number} tx_audio
-     * @param {number} tx_video
-     * @param {number} rx_audio
-     * @param {number} rx_video
+     * @param {bigint} tx_audio
+     * @param {bigint} tx_video
+     * @param {bigint} rx_audio
+     * @param {bigint} rx_video
      * @param {string | null | undefined} suite
      * @param {Uint8Array} secret
      * @returns {WasmPeer}

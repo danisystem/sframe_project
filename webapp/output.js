@@ -14,11 +14,11 @@ let logTextarea = null;
 
 /**
  * Restituisce (con caching) l'elemento <textarea id="log">, se esiste.
- * Evita query ripetute e problemi di accesso al DOM troppo presto.
+ * Evita query ripetute e si riprende da tentativi falliti se il DOM non era pronto.
  */
 function getLogElement() {
-  if (logTextarea === null) {
-    logTextarea = document.getElementById("log") || undefined;
+  if (!logTextarea) {
+    logTextarea = document.getElementById("log");
   }
   return logTextarea;
 }
@@ -35,7 +35,8 @@ function write(category, ...msg) {
   const text = msg
     .map((m) => {
       if (m instanceof Error) {
-        return `${m.name}: ${m.message}`;
+        // FIX: Salviamo lo stack trace per non impazzire col debug!
+        return m.stack ? m.stack : `${m.name}: ${m.message}`;
       }
       if (typeof m === "object") {
         try {
@@ -61,7 +62,7 @@ function write(category, ...msg) {
   const el = getLogElement();
   if (el) {
     el.value += line + "\n";
-    el.scrollTop = el.scrollHeight;
+    el.scrollTop = el.scrollHeight; // Auto-scroll verso il basso
   }
 }
 
@@ -75,24 +76,6 @@ export const Output = {
 
   // ------------------------------------------------------------
   // 🔥 Log dedicato agli HEADER SFrame
-  //
-  // direction: "TX" | "RX"
-  // kind: "audio" | "video"
-  //
-  // info (dal WASM):
-  // {
-  //   kid: number,
-  //   ctr: number,
-  //   header_len: number,
-  //   aad_len: number,
-  //   ct_len: number,
-  //   tag_len: number,
-  //   total_len: number,
-  //   header_hex?: string,
-  //   nonce_hex?: string,
-  //   aad_hex?: string,
-  //   tag_hex?: string
-  // }
   // ------------------------------------------------------------
   sframeHeader(direction, kind, info) {
     if (!isSFrameLogEnabled()) return;
@@ -103,7 +86,7 @@ export const Output = {
     }
 
     // Riga principale compatibile col vecchio formato
-    const baseLine = `${direction} ${kind} | + kid=${info.kid} + ctr=${info.ctr} + aad=${info.aad_len}B + ct=${info.ct_len}B + tag=${info.tag_len}B + total=${info.total_len}B`;
+    const baseLine = `[HDR] ${direction} ${kind} | + kid=${info.kid} + ctr=${info.ctr} + aad=${info.aad_len}B + ct=${info.ct_len}B + tag=${info.tag_len}B + total=${info.total_len}B`;
     write("SFRAME", baseLine);
 
     // Dettagli extra opzionali

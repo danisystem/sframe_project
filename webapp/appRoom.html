@@ -230,14 +230,6 @@
       font-size: 15px;
     }
 
-    .log-controls label {
-      font-size: 12px;
-      color: #9ca3af;
-      display: flex;
-      align-items: center;
-      gap: 0.25rem;
-    }
-
     #log {
       flex: 1;
       width: 100%;
@@ -273,45 +265,6 @@
     #btnSframeLog.on {
       background: #00a82d;
       color: white;
-    }
-
-    /* ---------------- OVERLAY & TOAST (usati da appRoom.js) ---------------- */
-
-    #keySyncOverlay {
-      position: fixed;
-      top: 10px;
-      right: 10px;
-      z-index: 9999;
-      background: rgba(15, 23, 42, 0.9);
-      color: #e5e7eb;
-      padding: 8px 12px;
-      border-radius: 999px;
-      font-size: 12px;
-      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
-      pointer-events: none;
-      display: none; /* il JS la mostra/nasconde */
-    }
-
-    #toastContainer {
-      position: fixed;
-      bottom: 16px;
-      left: 50%;
-      transform: translateX(-50%);
-      z-index: 9998;
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-      pointer-events: none;
-    }
-
-    /* I toast sono creati via JS, qui solo stile generico */
-    #toastContainer .toast {
-      background: rgba(15, 23, 42, 0.95);
-      color: #e5e7eb;
-      padding: 6px 10px;
-      border-radius: 999px;
-      font-size: 13px;
-      box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
     }
 
     @media (max-width: 1100px) {
@@ -394,23 +347,13 @@
       <div class="panel" style="display:flex; flex-direction:column; gap:0.5rem; height:100%;">
         <div class="log-controls">
           <h2>Log</h2>
-          <label>
-            Mostra dettagli SFrame
-            <button id="btnSframeLog" class="off">SFrame Log: OFF</button>
-          </label>
+          <button id="btnSframeLog" class="off">SFrame Log: OFF</button>
         </div>
         <textarea id="log" readonly></textarea>
       </div>
     </div>
   </div>
 
-  <!-- Overlay per "key sync in progress" (gestito da appRoom.js) -->
-  <div id="keySyncOverlay"></div>
-
-  <!-- Container per i toast "X si è unito" (riempito da appRoom.js) -->
-  <div id="toastContainer"></div>
-
-  <!-- Carico SOLO appRoom.js: lui importa tutto il resto -->
   <script type="module" src="./appRoom.js"></script>
 </body>
 </html>

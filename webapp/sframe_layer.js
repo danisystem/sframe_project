@@ -1,18 +1,6 @@
 // sframe_layer.js
 // -------------------------------------------------------------
 // Layer JavaScript sopra il modulo WASM sframe_core
-//
-// Responsabilità:
-// - Inizializzare il runtime WASM (se non già fatto da bootstrap_sframe.js)
-// - Esporre funzioni di alto livello per creare i peer SFrame:
-//   * createTxPeer(kidAudio, kidVideo, txKey)
-//   * createRxPeer(txKidDummyA, txKidDummyV, kidAudio, kidVideo, rxKey)
-//
-// NOTA:
-// bootstrap_sframe.js importa già sframe_core.js e lo inizializza
-// a livello globale. Qui gestiamo il caso in cui il bootstrap non sia
-// ancora stato eseguito (o in contesti di test), evitando doppie
-// inizializzazioni inutili.
 // -------------------------------------------------------------
 
 import initWasm, {
@@ -22,60 +10,57 @@ import initWasm, {
 
 import { Output } from "./output.js";
 
-let wasmReady = false;
+// Variabile per evitare race-conditions durante il caricamento WASM
+let initPromise = null;
 
 /**
- * Inizializza il modulo SFrame WASM (idempotente).
- *
- * Possibili scenari:
- * - bootstrap_sframe.js ha già eseguito init() e creato window.SFRAME:
- *   → segniamo solo wasmReady = true.
- * - Altrimenti chiamiamo initWasm() qui e popoliamo window.SFRAME.
+ * Inizializza il modulo SFrame WASM (idempotente e thread-safe per l'event loop).
  */
 export async function initSFrame() {
-  if (wasmReady) {
-    return;
-  }
-
-  // Caso 1: bootstrap_sframe.js ha già creato window.SFRAME
+  // Caso 1: è già stato inizializzato (da noi o da bootstrap_sframe.js)
   if (window.SFRAME && window.SFRAME.WasmPeer) {
-    wasmReady = true;
-    Output.sframe("WASM SFrame already initialized (bootstrap)");
     return;
   }
 
-  // Caso 2: inizializziamo noi il runtime WASM
-  try {
-    await initWasm(); // Carica sframe_core_bg.wasm
-
-    window.SFRAME = {
-      WasmPeer,
-      inspect: sframe_inspect,
-    };
-
-    wasmReady = true;
-    Output.sframe("WASM SFrame initialized");
-  } catch (e) {
-    Output.error("SFrame init failed", e);
+  // Caso 2: qualcuno ha già avviato l'inizializzazione e stiamo aspettando
+  if (initPromise) {
+    return initPromise;
   }
+
+  // Caso 3: siamo i primi a richiederlo, avviamo il download/parsing del WASM
+  initPromise = (async () => {
+    try {
+      await initWasm(); // Carica sframe_core_bg.wasm
+
+      window.SFRAME = {
+        WasmPeer,
+        inspect: sframe_inspect,
+      };
+
+      Output.sframe("WASM SFrame initialized");
+    } catch (e) {
+      Output.error("SFrame init failed", e);
+      initPromise = null; // In caso di errore, resettiamo per permettere nuovi tentativi
+      throw e; 
+    }
+  })();
+
+  return initPromise;
 }
 
 /**
  * Crea un peer SFrame per la trasmissione (TX) di audio + video.
- *
- * - kidAudio / kidVideo:
- *   KID SFrame per le due tracce TX.
- * - txKey:
- *   Chiave simmetrica derivata da MLS (HKDF).
- *
- * Ritorna un'istanza di WasmPeer oppure null in caso di errore.
  */
 export function createTxPeer(kidAudio, kidVideo, txKey) {
   try {
-    const peer = new WasmPeer(kidAudio, kidVideo, null, txKey);
-
+    // FIX: Convertiamo i numeri in BigInt per soddisfare il tipo u64 in Rust
+    const peer = new WasmPeer(
+      BigInt(kidAudio),
+      BigInt(kidVideo),
+      null,
+      txKey
+    );
     Output.sframe("TX Peer created", { kidAudio, kidVideo });
-
     return peer;
   } catch (e) {
     Output.error("TX Peer creation failed", e);
@@ -85,19 +70,6 @@ export function createTxPeer(kidAudio, kidVideo, txKey) {
 
 /**
  * Crea un peer SFrame per la ricezione (RX) di audio + video.
- *
- * - txKidDummyA / txKidDummyV:
- *   KID “fittizi” per la direzione TX di questo peer
- *   (non usati nella webapp, ma richiesti dal costruttore full-duplex di WasmPeer).
- *
- * - kidAudio / kidVideo:
- *   KID SFrame utilizzati per la decryption dei flussi
- *   provenienti dal sender remoto.
- *
- * - rxKey:
- *   Chiave simmetrica derivata da MLS per quel sender_index remoto.
- *
- * Ritorna un'istanza di WasmPeer oppure null in caso di errore.
  */
 export function createRxPeer(
   txKidDummyA,
@@ -107,17 +79,16 @@ export function createRxPeer(
   rxKey
 ) {
   try {
+    // FIX: Convertiamo tutti i KID in BigInt
     const peer = WasmPeer.new_full_duplex(
-      txKidDummyA,
-      txKidDummyV,
-      kidAudio,
-      kidVideo,
+      BigInt(txKidDummyA),
+      BigInt(txKidDummyV),
+      BigInt(kidAudio),
+      BigInt(kidVideo),
       null,
       rxKey
     );
-
     Output.sframe("RX Peer created", { kidAudio, kidVideo });
-
     return peer;
   } catch (e) {
     Output.error("RX Peer creation failed", e);

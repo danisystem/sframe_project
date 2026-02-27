@@ -5,7 +5,7 @@
 // API:
 //   export async function hkdf(master, label, length)
 //
-// - master: Uint8Array (IKM, tipicamente master_secret MLS)
+// - master: Uint8Array / ArrayBuffer (IKM, tipicamente master_secret MLS)
 // - label: string (info / contesto)
 // - length: numero di byte richiesti
 //
@@ -17,9 +17,10 @@
 
 function toUint8Array(data) {
   if (data instanceof Uint8Array) return data;
+  if (data instanceof ArrayBuffer) return new Uint8Array(data); // FIX: Supporto ArrayBuffer
   if (Array.isArray(data)) return new Uint8Array(data);
 
-  throw new Error("hkdf: IKM non è Uint8Array / Array");
+  throw new Error("hkdf: IKM non è Uint8Array / ArrayBuffer / Array");
 }
 
 function utf8Encode(str) {
@@ -45,7 +46,7 @@ export async function hkdf(master, label, length) {
 
   const ikmBytes = toUint8Array(master);
   const infoBytes = utf8Encode(label);
-  const L = length >>> 0; // forza unsigned 32-bit
+  const L = length >>> 0; // forza unsigned 32-bit (corretto qui, i byte richiesti sono pochi)
 
   const hashLen = 32; // SHA-256 output size
   const zeroSalt = new Uint8Array(hashLen); // salt = 32 byte a zero
