@@ -14,7 +14,6 @@ import { Output } from "./output.js";
 import {
   mlsJoin,
   mlsFetchRoster,
-  mlsResync, // ← resync epoch / master_secret
   deriveTxKey,
   deriveRxKey,
   computeKid,
@@ -29,7 +28,7 @@ import {
   createRxPeer,
 } from "./sframe_layer.js";
 
-// 🔹 FUNZIONI WASM PER GLI HEADER SFRAME (già presenti in lib.rs)
+// 🔹 FUNZIONI WASM PER GLI HEADER SFRAME (già presenti in lib.rs, niente rebuild)
 import {
   sframe_last_tx_header,
   sframe_last_rx_header,
@@ -53,133 +52,8 @@ let mlsInfo = null;
 // Identity “base” (senza #index MLS)
 let myIdentity = null;
 
-// Ref mutabile al TX peer SFrame: { peer: WasmPeer } oppure null
-let txPeerRef = null;
-
-// feedId → {feedId, display, pc, rxPeerRef, videoEl, handleId, receivers}
+// feedId → {feedId, display, pc, rxPeer, videoEl, handleId}
 const subscribers = new Map();
-
-// throttling error per RX decrypt (per non spammare log)
-let lastRxDecryptErrorTs = 0;
-
-// stato di "key sync in corso"
-let keySyncInProgress = false;
-
-// ─────────────────────────────────────────────────────────────
-// Utility UI: overlay “syncing keys” + toast stile Zoom
-// ─────────────────────────────────────────────────────────────
-
-function ensureKeySyncOverlay() {
-  let overlay = document.getElementById("keySyncOverlay");
-  if (!overlay) {
-    overlay = document.createElement("div");
-    overlay.id = "keySyncOverlay";
-    overlay.style.position = "fixed";
-    overlay.style.top = "10px";
-    overlay.style.right = "10px";
-    overlay.style.zIndex = "9999";
-    overlay.style.background = "rgba(15,23,42,0.9)";
-    overlay.style.color = "#e5e7eb";
-    overlay.style.padding = "8px 12px";
-    overlay.style.borderRadius = "999px";
-    overlay.style.fontSize = "12px";
-    overlay.style.display = "none";
-    overlay.style.boxShadow = "0 4px 12px rgba(0,0,0,0.4)";
-    overlay.style.pointerEvents = "none";
-    document.body.appendChild(overlay);
-  }
-  return overlay;
-}
-
-function setKeySyncInProgress(active, reason) {
-  keySyncInProgress = active;
-  const overlay = ensureKeySyncOverlay();
-  if (active) {
-    overlay.textContent = reason
-      ? `🔐 Syncing encryption keys… (${reason})`
-      : "🔐 Syncing encryption keys…";
-    overlay.style.display = "block";
-  } else {
-    overlay.style.display = "none";
-  }
-}
-
-// Toast container stile Zoom “X si è unito”
-function ensureToastContainer() {
-  let container = document.getElementById("toastContainer");
-  if (!container) {
-    container = document.createElement("div");
-    container.id = "toastContainer";
-    container.style.position = "fixed";
-    container.style.bottom = "16px";
-    container.style.left = "50%";
-    container.style.transform = "translateX(-50%)";
-    container.style.zIndex = "9998";
-    container.style.display = "flex";
-    container.style.flexDirection = "column";
-    container.style.gap = "8px";
-    container.style.pointerEvents = "none";
-    document.body.appendChild(container);
-  }
-  return container;
-}
-
-function showJoinToast(display) {
-  const container = ensureToastContainer();
-  const { identity } = parseIdentityWithIndex(display || "");
-  const name = identity || display || "Unknown";
-
-  const toast = document.createElement("div");
-  toast.className = "toast";
-  toast.style.background = "rgba(15,23,42,0.95)";
-  toast.style.color = "#e5e7eb";
-  toast.style.padding = "6px 10px";
-  toast.style.borderRadius = "999px";
-  toast.style.fontSize = "13px";
-  toast.style.boxShadow = "0 4px 14px rgba(0,0,0,0.5)";
-  toast.style.opacity = "1";
-  toast.style.transition = "opacity 0.4s ease-out";
-
-  toast.textContent = `👤 ${name} si è unito alla stanza`;
-
-  container.appendChild(toast);
-
-  setTimeout(() => {
-    toast.style.opacity = "0";
-    setTimeout(() => {
-      if (toast.parentNode === container) {
-        container.removeChild(toast);
-      }
-    }, 400);
-  }, 1800);
-}
-
-// ─────────────────────────────────────────────────────────────
-// Feature detection: SFrame / Insertable Streams
-// ─────────────────────────────────────────────────────────────
-
-function isSFrameSupported() {
-  try {
-    const hasRTCRtpSender =
-      typeof RTCRtpSender !== "undefined" &&
-      RTCRtpSender.prototype &&
-      typeof RTCRtpSender.prototype.createEncodedStreams === "function";
-
-    const hasTransformStream = typeof TransformStream !== "undefined";
-
-    const supported = hasRTCRtpSender && hasTransformStream;
-    Output.sframe("SFrame support check", {
-      hasRTCRtpSender,
-      hasTransformStream,
-      supported,
-      userAgent: navigator.userAgent,
-    });
-    return supported;
-  } catch (e) {
-    Output.error("SFrame support detection failed", e);
-    return false;
-  }
-}
 
 // ─────────────────────────────────────────────────────────────
 // Utilità generali
@@ -240,100 +114,6 @@ async function refreshRosterUI() {
     renderRemotePeers(r.roster, myIdentity);
   } catch (e) {
     Output.error("MLS roster refresh failed", e);
-  }
-}
-
-// ─────────────────────────────────────────────────────────────
-// MLS resync + rekey
-// ─────────────────────────────────────────────────────────────
-
-// Resync MLS: controlla se l'epoch è cambiata e, se sì, rekey SFrame
-async function maybeResyncMls(reason) {
-  if (!mlsInfo || !myIdentity) return;
-
-  const room = Number(els.roomId.value);
-  if (!Number.isFinite(room) || room <= 0) return;
-
-  setKeySyncInProgress(true, reason);
-
-  try {
-    const { changed, info } = await mlsResync(myIdentity, room, mlsInfo);
-    if (!changed) {
-      Output.mls("MLS epoch unchanged", { reason, epoch: mlsInfo.epoch });
-      return;
-    }
-
-    Output.mls("MLS epoch CHANGED", {
-      reason,
-      oldEpoch: mlsInfo.epoch,
-      newEpoch: info.epoch,
-    });
-
-    mlsInfo = info;
-    await rekeyAllPeers();
-  } catch (e) {
-    Output.error("MLS resync failed", { reason, error: e });
-  } finally {
-    setKeySyncInProgress(false, reason);
-  }
-}
-
-// Rigenera chiavi/KID e aggiorna i peer SFrame TX/RX
-async function rekeyAllPeers() {
-  if (!mlsInfo) return;
-
-  const room = Number(els.roomId.value);
-  if (!Number.isFinite(room) || room <= 0) return;
-
-  // TX
-  if (pcPub && localStream && txPeerRef) {
-    try {
-      const selfIndex = mlsInfo.sender_index;
-      const txKey = await deriveTxKey(mlsInfo.master_secret, selfIndex);
-      const kidAudio = computeKid(mlsInfo.epoch, room, selfIndex);
-      const kidVideo = kidAudio + 1;
-
-      txPeerRef.peer = createTxPeer(kidAudio, kidVideo, txKey);
-
-      Output.sframe("TX peer rekeyed", {
-        epoch: mlsInfo.epoch, selfIndex, kidAudio, kidVideo,
-      });
-    } catch (e) {
-      Output.error("TX rekey failed", e);
-    }
-  }
-
-  // RX
-  for (const [feedId, sub] of subscribers.entries()) {
-    try {
-      const { senderIndex: remoteIndex } = parseIdentityWithIndex(sub.display || "");
-      if (remoteIndex == null) continue;
-
-      const rxKey = await deriveRxKey(mlsInfo.master_secret, remoteIndex);
-      const kidAudio = computeKid(mlsInfo.epoch, room, remoteIndex);
-      const kidVideo = kidAudio + 1;
-
-      sub.rxPeerRef = sub.rxPeerRef || {};
-      sub.rxPeerRef.peer = createRxPeer(99, 98, kidAudio, kidVideo, rxKey);
-
-      Output.sframe("RX peer rekeyed", {
-        feedId, remoteIndex, epoch: mlsInfo.epoch, kidAudio, kidVideo,
-      });
-
-      // 🔴 FIX: Richiedi un Keyframe a Janus per sbloccare subito il video!
-      if (sub.handleId && sessionId) {
-        sendJanus({
-          janus: "message",
-          transaction: makeTxId(`force-kf-${feedId}`),
-          session_id: sessionId,
-          handle_id: sub.handleId,
-          body: { request: "configure", keyframe: true }
-        });
-      }
-
-    } catch (e) {
-      Output.error("RX rekey failed", { feedId, error: e });
-    }
   }
 }
 
@@ -412,29 +192,6 @@ async function setupRoomOnLoad() {
 }
 
 // ─────────────────────────────────────────────────────────────
-// Helper: chiedere la lista completa dei partecipanti
-// ─────────────────────────────────────────────────────────────
-
-function requestParticipantsList() {
-  const room = Number(els.roomId.value);
-  if (!Number.isFinite(room) || room <= 0) return;
-  if (!sessionId || !pluginHandlePub) return;
-
-  Output.janus("Requesting participants list", { room });
-
-  sendJanus({
-    janus: "message",
-    transaction: makeTxId("listparticipants"),
-    session_id: sessionId,
-    handle_id: pluginHandlePub,
-    body: {
-      request: "listparticipants",
-      room,
-    },
-  });
-}
-
-// ─────────────────────────────────────────────────────────────
 // WS → Janus
 // ─────────────────────────────────────────────────────────────
 
@@ -503,76 +260,48 @@ function handleEvent(msg) {
   const data = plugindata.data || {};
   const vr = data.videoroom;
 
-  if (vr === "participants" && Array.isArray(data.participants)) {
-    const room = data.room;
-    const parts = data.participants.filter(p => p.publisher);
-
-    Output.janus("Participants list", {
-      room,
-      participants: parts.map(p => ({ id: p.id, display: p.display })),
-    });
-
-    parts.forEach(p => {
-      const { identity: name } = parseIdentityWithIndex(p.display || "");
-      if (name === myIdentity) return;
-      subscribeToPublisher(p.id, p.display);
-    });
-
-    maybeResyncMls("participants-list").catch(() => {});
-  }
-
   // Eventi per il nostro Publisher
   if (sender === pluginHandlePub) {
+
     if (vr === "joined") {
       Output.janus("Joined as publisher", data.id);
+
+      // publisher già presenti
       if (Array.isArray(data.publishers)) {
         data.publishers.forEach(p => subscribeToPublisher(p.id, p.display));
       }
+
+      // roster iniziale (dal punto di vista di chi entra ora)
       refreshRosterUI().catch(() => {});
-      startPublishing().catch(e => {
-        Output.error("startPublishing error (joined)", e);
-      });
-      requestParticipantsList();
-      return;
+
+      startPublishing();
     }
 
-    if (vr === "event") {
-      if (Array.isArray(data.publishers)) {
-        // 🔴 FIX: Prima sincronizziamo MLS, poi ci iscriviamo al video!
-        maybeResyncMls("new-publishers").finally(() => {
-          data.publishers.forEach(p => {
-            subscribeToPublisher(p.id, p.display);
-            showJoinToast(p.display || `Feed ${p.id}`);
-          });
-          refreshRosterUI().catch(() => {});
-        });
-      }
-
-      if (data.configured === "ok") {
-        requestParticipantsList();
-      }
+    if (vr === "event" && Array.isArray(data.publishers)) {
+      // nuovi publisher che entrano
+      data.publishers.forEach(p => subscribeToPublisher(p.id, p.display));
+      // aggiorna roster ovunque
+      refreshRosterUI().catch(() => {});
     }
 
+    // 🔧 FIX: gestiamo sia `unpublished` sia `leaving` coerzendo a numero
     if (data.unpublished) {
       const fid = Number(data.unpublished);
       if (Number.isFinite(fid)) {
         removeSubscriber(fid);
-        maybeResyncMls("unpublished").catch(() => {});
-        refreshRosterUI().catch(() => {});
       }
     }
     if (data.leaving) {
       const fid = Number(data.leaving);
       if (Number.isFinite(fid)) {
         removeSubscriber(fid);
-        maybeResyncMls("leaving").catch(() => {});
-        refreshRosterUI().catch(() => {});
       }
     }
 
     if (jsep) {
       pcPub.setRemoteDescription(new RTCSessionDescription(jsep));
     }
+
     return;
   }
 
@@ -607,28 +336,40 @@ async function joinAsPublisher() {
     return;
   }
 
-  myIdentity = els.displayName.value.trim() || ("user-" + crypto.randomUUID());
+  // Identity base per questo peer (senza #index MLS)
+  myIdentity =
+    els.displayName.value.trim() || ("user-" + crypto.randomUUID());
 
   try {
-    // 🔴 FIX: Carica WASM subito all'inizio della connessione!
-    await initSFrame(); 
-
+    // 1) MLS JOIN (se non già fatto)
     if (!mlsInfo) {
       mlsInfo = await mlsJoin(myIdentity, room);
       Output.mls("MLS JOIN OK", mlsInfo);
+
+      // aggiorna subito la lista “Remote peers”
       renderRemotePeers(mlsInfo.roster, myIdentity);
     }
 
-    const fullIdentity = attachIndexToIdentity(myIdentity, mlsInfo.sender_index);
+    // 2) Identity per Janus = "nome#sender_index"
+    const fullIdentity = attachIndexToIdentity(
+      myIdentity,
+      mlsInfo.sender_index
+    );
 
     Output.ui("Join as publisher", { room, identity: fullIdentity });
 
+    // 3) Join VideoRoom
     sendJanus({
       janus: "message",
       transaction: makeTxId("join-pub"),
       session_id: sessionId,
       handle_id: pluginHandlePub,
-      body: { request: "join", ptype: "publisher", room, display: fullIdentity },
+      body: {
+        request: "join",
+        ptype: "publisher",
+        room,
+        display: fullIdentity,
+      },
     });
 
   } catch (e) {
@@ -646,6 +387,7 @@ async function startPublishing() {
       return;
     }
 
+    // safety: se per qualche motivo mlsInfo non c'è, rifacciamo join
     if (!mlsInfo) {
       myIdentity =
         els.displayName.value.trim() || ("user-" + crypto.randomUUID());
@@ -654,16 +396,20 @@ async function startPublishing() {
       renderRemotePeers(mlsInfo.roster, myIdentity);
     }
 
+    // Init SFrame WASM
     await initSFrame();
 
+    // TX key derivata via MLS (singola chiave per audio+video)
     const selfIndex = mlsInfo.sender_index;
     const txKey = await deriveTxKey(mlsInfo.master_secret, selfIndex);
 
+    // KID TX (audio/video) per questo peer – dipendono da (epoch, room, sender)
     const kidAudio = computeKid(mlsInfo.epoch, room, selfIndex);
     const kidVideo = kidAudio + 1;
 
-    txPeerRef = { peer: createTxPeer(kidAudio, kidVideo, txKey) };
+    const txPeer = createTxPeer(kidAudio, kidVideo, txKey);
 
+    // WebRTC
     pcPub = new RTCPeerConnection({ iceServers: [] });
 
     pcPub.onicecandidate = ev => {
@@ -686,6 +432,7 @@ async function startPublishing() {
       });
     };
 
+    // Media locale
     localStream = await navigator.mediaDevices.getUserMedia({
       audio: { echoCancellation: true },
       video: {
@@ -697,16 +444,17 @@ async function startPublishing() {
 
     els.localVideo.srcObject = localStream;
 
+    // Aggiungi tracce + trasformazioni SFrame TX
     const aTrack = localStream.getAudioTracks()[0];
     if (aTrack) {
       const s = pcPub.addTrack(aTrack, localStream);
-      attachSenderTransform(s, "audio", txPeerRef);
+      attachSenderTransform(s, "audio", txPeer);
     }
 
     const vTrack = localStream.getVideoTracks()[0];
     if (vTrack) {
       const s = pcPub.addTrack(vTrack, localStream);
-      attachSenderTransform(s, "video", txPeerRef);
+      attachSenderTransform(s, "video", txPeer);
     }
 
     const offer = await pcPub.createOffer();
@@ -736,7 +484,7 @@ async function startPublishing() {
 // Sender Transform (TX) + SFrame header log
 // ─────────────────────────────────────────────────────────────
 
-function attachSenderTransform(sender, kind, txPeerRefLocal) {
+function attachSenderTransform(sender, kind, txPeer) {
   if (!sender.createEncodedStreams) return;
 
   const { readable, writable } = sender.createEncodedStreams();
@@ -744,21 +492,18 @@ function attachSenderTransform(sender, kind, txPeerRefLocal) {
   const transform = new TransformStream({
     async transform(chunk, controller) {
       try {
-        if (!txPeerRefLocal || !txPeerRefLocal.peer) {
-          controller.enqueue(chunk);
-          return;
-        }
-
         const u8 = new Uint8Array(chunk.data);
         const out =
           kind === "audio"
-            ? txPeerRefLocal.peer.encrypt_audio(u8)
-            : txPeerRefLocal.peer.encrypt_video(u8);
+            ? txPeer.encrypt_audio(u8)
+            : txPeer.encrypt_video(u8);
         chunk.data = out.buffer;
 
+        // 🔍 Log header SFrame TX se abilitato
         if (isSFrameLogEnabled()) {
           try {
             const h = sframe_last_tx_header();
+            // h è un oggetto { kid, ctr, header_len, aad_len, ct_len, tag_len, total_len, header_hex }
             if (h && h.kid !== undefined) {
               Output.sframeHeader("TX", kind, {
                 kid: h.kid,
@@ -800,9 +545,8 @@ function subscribeToPublisher(feedId, display) {
     display,   // es. "nome#senderIndex"
     pc: null,
     handleId: null,
-    rxPeerRef: null,
+    rxPeer: null,
     videoEl: null,
-    receivers: [], // lista RTCRtpReceiver
   });
 
   sendJanus({
@@ -863,7 +607,6 @@ async function handleSubscriberJsep(feedId, sub, jsep) {
       };
 
       pc.ontrack = ev => {
-        // UI video
         if (!sub.videoEl) {
           const box = document.createElement("div");
           box.className = "remoteBox";
@@ -885,15 +628,6 @@ async function handleSubscriberJsep(feedId, sub, jsep) {
         if (!sub.videoEl.srcObject && ev.streams[0]) {
           sub.videoEl.srcObject = ev.streams[0];
         }
-
-        // SFrame RX: attacchiamo le trasformazioni APPENA arriva la traccia
-        const receiver = ev.receiver;
-        sub.receivers.push(receiver);
-
-        if (receiver._sframeAttached) return; // evita doppi attach
-        receiver._sframeAttached = true;
-
-        attachReceiverTransform(receiver, receiver.track.kind, sub);
       };
 
       sub.pc = pc;
@@ -922,12 +656,13 @@ async function handleSubscriberJsep(feedId, sub, jsep) {
     const kidAudio = computeKid(mlsInfo.epoch, room, remoteIndex);
     const kidVideo = kidAudio + 1;
 
-    sub.rxPeerRef = { peer: createRxPeer(99, 98, kidAudio, kidVideo, rxKey) };
+    sub.rxPeer = createRxPeer(99, 98, kidAudio, kidVideo, rxKey);
 
-    // NB: le trasformazioni RX vengono attaccate in ontrack.
-    // Qui ci assicuriamo solo che, se qualche receiver è già arrivato,
-    // abbia la ref aggiornata a rxPeerRef.
-    // (attachReceiverTransform userà sempre sub.rxPeerRef.peer.)
+    // Attacca trasformazioni RX
+    sub.pc.getReceivers().forEach(r => {
+      if (r.track.kind === "audio") attachReceiverTransform(r, "audio", sub);
+      if (r.track.kind === "video") attachReceiverTransform(r, "video", sub);
+    });
 
     const answer = await sub.pc.createAnswer();
     await sub.pc.setLocalDescription(answer);
@@ -958,36 +693,23 @@ function attachReceiverTransform(receiver, kind, sub) {
   const transform = new TransformStream({
     async transform(chunk, controller) {
       try {
-        // Durante il key sync → droppiamo i frame
-        if (keySyncInProgress) {
-          return;
-        }
-
-        if (!sub.rxPeerRef || !sub.rxPeerRef.peer) {
-          // chiavi non pronte → non mandiamo frame cifrati al decoder
-          return;
-        }
-
         const u8 = new Uint8Array(chunk.data);
         let outU8;
 
         try {
           outU8 =
             kind === "audio"
-              ? sub.rxPeerRef.peer.decrypt_audio(u8)
-              : sub.rxPeerRef.peer.decrypt_video(u8);
+              ? sub.rxPeer.decrypt_audio(u8)
+              : sub.rxPeer.decrypt_video(u8);
         } catch (e) {
-          const now = Date.now();
-          if (now - lastRxDecryptErrorTs > 1000) {
-            lastRxDecryptErrorTs = now;
-            Output.error("RX decrypt", e);
-          }
-          // frame cifrato non utilizzabile → non enqueue
+          Output.error("RX decrypt", e);
+          controller.enqueue(chunk);
           return;
         }
 
         chunk.data = outU8.buffer;
 
+        // 🔍 Log header SFrame RX se abilitato
         if (isSFrameLogEnabled()) {
           try {
             const h = sframe_last_rx_header();
@@ -1011,12 +733,8 @@ function attachReceiverTransform(receiver, kind, sub) {
 
         controller.enqueue(chunk);
       } catch (e) {
-        const now = Date.now();
-        if (now - lastRxDecryptErrorTs > 1000) {
-          lastRxDecryptErrorTs = now;
-          Output.error("RX decrypt outer", e);
-        }
-        return;
+        Output.error("RX decrypt", e);
+        controller.enqueue(chunk);
       }
     },
   });
@@ -1049,17 +767,6 @@ function connectAndJoinRoom() {
 
   if (!Number.isFinite(room) || room <= 0) {
     Output.error("No room in URL, cannot join");
-    return;
-  }
-
-  if (!isSFrameSupported()) {
-    Output.error(
-      "Questo browser non supporta WebRTC Insertable Streams / SFrame. Connessione bloccata."
-    );
-    alert(
-      "Questo browser non supporta le API necessarie per la cifratura SFrame.\n" +
-      "Prova con Chrome/Brave/Edge o Firefox (desktop) aggiornati."
-    );
     return;
   }
 
@@ -1119,10 +826,6 @@ function cleanup() {
   pluginHandlePub = null;
   mlsInfo = null;
   myIdentity = null;
-  txPeerRef = null;
-  lastRxDecryptErrorTs = 0;
-  keySyncInProgress = false;
-  setKeySyncInProgress(false);
 
   setConnectedUI(false);
 }

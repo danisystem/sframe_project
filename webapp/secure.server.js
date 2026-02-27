@@ -1,8 +1,14 @@
-//
 // secure-server.js (COMMONJS)
 //
 // HTTPS + static files + proxy MLS (HTTP) + proxy Janus (WS) + API /api/new-room
 //
+// Ruolo:
+//  - Espone la webapp via HTTPS (https://sframe.local/)
+//  - Offre un endpoint REST per creare stanze Janus:  POST /api/new-room
+//  - Fa da reverse proxy verso:
+//      * MLS server (http://127.0.0.1:3000)
+//      * Janus (HTTP REST + WebSocket)
+//  - Dal punto di vista del browser, TUTTO passa da qui in HTTPS/WSS.
 
 const fs = require("fs");
 const https = require("https");
@@ -11,29 +17,44 @@ const { WebSocketServer, WebSocket } = require("ws");
 const path = require("path");
 const http = require("http");
 
-const KEY  = path.join(__dirname, "..", "pki", "server", "server-key.pem");
+// -----------------------------------------------------------------------------
+// CONFIG: certificati HTTPS locali (self-signed)
+// -----------------------------------------------------------------------------
+
+const KEY = path.join(__dirname, "..", "pki", "server", "server-key.pem");
 const CERT = path.join(__dirname, "..", "pki", "server", "server.pem");
 
-// === MLS SERVER BACKEND (HTTP) ===
+// -----------------------------------------------------------------------------
+// CONFIG: backend MLS (HTTP)
+// -----------------------------------------------------------------------------
+
 const MLS_HOST = "127.0.0.1";
 const MLS_PORT = 3000;
 
-// === JANUS BACKEND (WS + HTTP) ===
-const JANUS_WS_URL   = "ws://127.0.0.1:8188/janus";   // WS (proxy WSS → WS)
-const JANUS_HTTP_URL = "http://127.0.0.1:8088/janus"; // HTTP REST
+// -----------------------------------------------------------------------------
+// CONFIG: backend Janus (WS + HTTP)
+// -----------------------------------------------------------------------------
+
+// Janus WebSocket (backend interno) – qui facciamo proxy WSS → WS
+const JANUS_WS_URL = "ws://127.0.0.1:8188/janus";
+
+// Janus HTTP REST (backend interno)
+const JANUS_HTTP_URL = "http://127.0.0.1:8088/janus";
 
 const app = express();
 
-// per leggere JSON dal browser
+// Per leggere JSON dal browser (body parser)
 app.use(express.json());
 
-// ===== STATIC FILES =====
+// -----------------------------------------------------------------------------
+// STATIC FILES
+// -----------------------------------------------------------------------------
+
 app.use(express.static(__dirname));
 
-// Home
+// Home "di servizio" per verificare che il gateway sia attivo
 app.get("/", (req, res) => {
-  res.send(`
-    <html>
+  res.send(`<html>
       <head><title>SFrame HTTPS Gateway</title></head>
       <body style="background:#0f172a; color:#e5e7eb; font-family:system-ui;">
         <h1>HTTPS/WSS + MLS + Janus server attivo ✅</h1>
@@ -41,15 +62,13 @@ app.get("/", (req, res) => {
           <li>Webapp: <code>GET /appRoom.html?room=1234</code> (esempio)</li>
           <li>API nuova stanza: <code>POST /api/new-room</code></li>
           <li>MLS join: <code>POST /mls/join</code> → http://${MLS_HOST}:${MLS_PORT}/mls/join</li>
-          <li>MLS roster: <code>GET /mls/roster?room=ID</code> → http://${MLS_HOST}:${MLS_PORT}/mls/roster</li>
+          <li>MLS roster: <code>GET /mls/roster?room_id=ID</code> → http://${MLS_HOST}:${MLS_PORT}/mls/roster</li>
           <li>Janus WS proxy: <code>wss://sframe.local/janus</code> → ${JANUS_WS_URL}</li>
           <li>Janus HTTP backend: <code>${JANUS_HTTP_URL}</code></li>
         </ul>
       </body>
-    </html>
-  `);
+    </html>`);
 });
-
 
 // ============================================================================
 //  PROXY MLS: POST /mls/join
@@ -92,13 +111,11 @@ app.post("/mls/join", (req, res) => {
   proxyReq.end();
 });
 
-
 // ============================================================================
-//  PROXY MLS: GET /mls/roster?room=ID
+//  PROXY MLS: GET /mls/roster
 // ============================================================================
 
 app.get("/mls/roster", (req, res) => {
-  // inoltriamo la query string così com'è (in particolare room=)
   const qs = req.url.includes("?") ? req.url.slice(req.url.indexOf("?")) : "";
   const pathWithQs = "/mls/roster" + qs;
 
@@ -130,7 +147,6 @@ app.get("/mls/roster", (req, res) => {
 
   proxyReq.end();
 });
-
 
 // ============================================================================
 //  HELPER: chiamata HTTP POST JSON a Janus (REST)
@@ -180,7 +196,6 @@ function randomTx(prefix) {
   return `${prefix}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
-
 // ============================================================================
 //  HELPER: create session + attach videoroom + create room
 // ============================================================================
@@ -221,7 +236,7 @@ async function janusCreateRoom(roomId) {
   console.log("[ROOM] Creating room", roomId);
 
   const sessionId = await janusCreateSession();
-  const handleId  = await janusAttachVideoRoom(sessionId);
+  const handleId = await janusAttachVideoRoom(sessionId);
 
   const payload = {
     janus: "message",
@@ -238,7 +253,6 @@ async function janusCreateRoom(roomId) {
   const json = await janusHttpCall(payload);
   console.log("[ROOM] room create resp:", json);
 
-  // Janus può rispondere janus:"success" con data.plugindata
   if (json.janus !== "success") {
     throw new Error("Unexpected Janus response in room create");
   }
@@ -246,14 +260,12 @@ async function janusCreateRoom(roomId) {
   return { roomId, sessionId, handleId };
 }
 
-
 // ============================================================================
 //  API: POST /api/new-room  → { roomId }
 // ============================================================================
 
 app.post("/api/new-room", async (req, res) => {
   try {
-    // opzionalmente client può mandare {roomId: 123456}, altrimenti random 6 cifre
     let { roomId } = req.body || {};
     if (!roomId) {
       roomId = Math.floor(100000 + Math.random() * 900000);
@@ -269,7 +281,6 @@ app.post("/api/new-room", async (req, res) => {
   }
 });
 
-
 // ============================================================================
 //  HTTPS SERVER
 // ============================================================================
@@ -282,9 +293,8 @@ const httpsServer = https.createServer(
   app
 );
 
-
 // ============================================================================
-//  WSS → Janus (proxy)  (uguale a prima)
+//  WSS → Janus (proxy WebSocket)
 // ============================================================================
 
 const wssJanus = new WebSocketServer({
@@ -316,10 +326,34 @@ wssJanus.on("connection", (clientWs) => {
   // Janus → browser
   janusWs.on("message", (msg) => {
     if (!clientOpen) return;
-    const text =
-      typeof msg === "string" ? msg : msg.toString("utf8");
+    const text = typeof msg === "string" ? msg : msg.toString("utf8");
 
     console.log("[Janus proxy] <<", text);
+
+    try {
+      const parsed = JSON.parse(text);
+      if (parsed.plugindata && parsed.plugindata.plugin === "janus.plugin.videoroom") {
+        const d = parsed.plugindata.data || {};
+        const publishers = Array.isArray(d.publishers)
+          ? d.publishers.map((p) => ({ id: p.id, display: p.display }))
+          : undefined;
+
+        console.log(
+          "[Janus VR] ←",
+          JSON.stringify({
+            janus: parsed.janus,
+            sender: parsed.sender,
+            vr: d.videoroom,
+            room: d.room,
+            publishers,
+            unpublished: d.unpublished,
+            leaving: d.leaving,
+            configured: d.configured,
+          })
+        );
+      }
+    } catch (_) {}
+
     clientWs.send(text);
   });
 
@@ -340,12 +374,27 @@ wssJanus.on("connection", (clientWs) => {
 
   // Browser → Janus
   clientWs.on("message", (msg) => {
-    const text =
-      typeof msg === "string" ? msg : msg.toString("utf8");
+    const text = typeof msg === "string" ? msg : msg.toString("utf8");
 
     console.log("[Janus proxy] >>", text);
 
-    if (janusWs.readyState === WebSocket.OPEN && janusOpen) {
+    try {
+      const parsed = JSON.parse(text);
+      if (parsed.body && parsed.body.request) {
+        console.log(
+          "[Janus VR] →",
+          JSON.stringify({
+            req: parsed.body.request,
+            room: parsed.body.room,
+            feed: parsed.body.feed,
+            ptype: parsed.body.ptype,
+          })
+        );
+      }
+    } catch (_) {}
+
+    // 🔴 FIX APPLICATO QUI: controlliamo che readyState sia === 1 (OPEN)
+    if (janusOpen && janusWs.readyState === 1) {
       janusWs.send(text);
     } else {
       console.log("[Janus proxy] Janus not open yet, queueing");
@@ -356,7 +405,7 @@ wssJanus.on("connection", (clientWs) => {
   clientWs.on("close", () => {
     clientOpen = false;
     console.log("[Janus proxy] Browser WS closed");
-    if (janusOpen && janusWs.readyState === WebSocket.OPEN) {
+    if (janusOpen && janusWs.readyState === 1) {
       janusWs.close();
     }
   });
@@ -364,17 +413,17 @@ wssJanus.on("connection", (clientWs) => {
   clientWs.on("error", (err) => {
     clientOpen = false;
     console.error("[Janus proxy] Browser WS error:", err.message);
-    if (janusOpen && janusWs.readyState === WebSocket.OPEN) {
+    if (janusOpen && janusWs.readyState === 1) {
       janusWs.close(1011, "Client error");
     }
   });
 });
 
-
 // ===== START =====
+
 httpsServer.listen(443, "0.0.0.0", () => {
-  console.log("HTTPS/WSS + MLS + Janus server attivo su https://sframe.local/");
-  console.log(`MLS backend:    http://${MLS_HOST}:${MLS_PORT}`);
+  console.log(`HTTPS/WSS + MLS + Janus server attivo su https://sframe.local/`);
+  console.log(`MLS backend:        http://${MLS_HOST}:${MLS_PORT}`);
   console.log(`Janus backend WS:   ${JANUS_WS_URL}`);
   console.log(`Janus backend HTTP: ${JANUS_HTTP_URL}`);
 });

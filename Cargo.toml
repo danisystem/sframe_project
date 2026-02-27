@@ -66,9 +66,28 @@ tls_codec = "0.4"
 # ── Dipendenze SOLO per wasm ───────────────────────────────────────────────────
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = { version = "0.2.105", features = ["serde-serialize"] }
-# console_error_panic_hook = "0.1"   # opzionale per panics leggibili
 serde = { version = "1.0", features = ["derive"] }
 serde-wasm-bindgen = "0.6"
+
+# OpenMLS (WASM): serve la feature "js"
+openmls = { version = "0.7.1", features = ["js"] }
+openmls_basic_credential = "0.4.1"
+openmls_rust_crypto = "0.4.1"
+openmls_traits = "0.4.1"
+
+base64 = "0.22"
+serde_json = "1.0"
+
+hkdf = "0.12"
+sha2 = "0.10"
+
+# (opzionale, ma spesso utile averlo esplicito)
+tls_codec = "0.4"
+
+# 🆕 per MlsClient (stato globale + log in console)
+once_cell = "1.19"
+web-sys = { version = "0.3", features = ["console"] }
+
 
 [[bin]]
 name = "tx_audio"

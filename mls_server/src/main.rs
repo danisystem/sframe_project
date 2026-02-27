@@ -4,14 +4,11 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-
 use warp::Filter;
 use serde::{Serialize, Deserialize};
-
 use openmls::prelude::*;
 use openmls_basic_credential::SignatureKeyPair;
 use openmls_rust_crypto::OpenMlsRustCrypto;
-
 use base64::Engine;
 
 // ─────────────────────────────────────────────────────────────
@@ -78,7 +75,6 @@ impl Groups {
 // helper: crea un nuovo gruppo MLS e ne estrae master_secret/epoch/group_id
 fn make_group_state() -> GroupState {
     let provider = OpenMlsRustCrypto::default();
-
     let ciphersuite =
         Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519;
 
@@ -133,7 +129,6 @@ async fn handle_join(
     req: JoinRequest,
     groups: Groups,
 ) -> Result<impl warp::Reply, warp::Rejection> {
-
     let JoinRequest { identity, room_id } = req;
 
     let mut map = groups.inner.lock().unwrap();
@@ -145,9 +140,12 @@ async fn handle_join(
     });
 
     // identity già presente in questa room? → riusa index
-    if let Some(existing) = gs.roster.iter().find(|m| m.identity == identity) {
+    if let Some(existing) =
+        gs.roster.iter().find(|m| m.identity == identity)
+    {
         let master_b64 =
             base64::engine::general_purpose::STANDARD.encode(&gs.master_secret);
+
         let gid_hex = gs.group_id
             .iter()
             .map(|b| format!("{:02x}", b))
@@ -163,8 +161,11 @@ async fn handle_join(
         };
 
         println!(
-            "[MLS] re-join room={} identity={} → sender_index={}",
-            room_id, existing.identity, existing.index
+            "[MLS] re-join room={} identity={} → sender_index={} (epoch={})",
+            room_id,
+            existing.identity,
+            existing.index,
+            gs.epoch
         );
 
         return Ok(warp::reply::json(&resp));
@@ -177,6 +178,15 @@ async fn handle_join(
         index: new_idx,
         identity: identity.clone(),
     });
+
+    // NEW: cambio di epoch + nuovo master_secret ad ogni nuovo join
+    {
+        let new_gs = make_group_state();
+
+        gs.epoch = gs.epoch.saturating_add(1);
+        gs.master_secret = new_gs.master_secret;
+        // group_id lo lasciamo invariato per questa stanza
+    }
 
     let master_b64 =
         base64::engine::general_purpose::STANDARD.encode(&gs.master_secret);
@@ -196,8 +206,11 @@ async fn handle_join(
     };
 
     println!(
-        "[MLS] new join room={} identity={} → sender_index={}",
-        room_id, identity, new_idx
+        "[MLS] new join room={} identity={} → sender_index={} (epoch={})",
+        room_id,
+        identity,
+        new_idx,
+        gs.epoch
     );
 
     Ok(warp::reply::json(&resp))
@@ -211,7 +224,6 @@ async fn handle_roster(
     query: RosterQuery,
     groups: Groups,
 ) -> Result<impl warp::Reply, warp::Rejection> {
-
     let map = groups.inner.lock().unwrap();
 
     if let Some(gs) = map.get(&query.room_id) {
@@ -283,7 +295,10 @@ async fn main() {
         .with(cors);
 
     println!("MLS server running on http://0.0.0.0:3000");
-    warp::serve(routes).run(([0, 0, 0, 0], 3000)).await;
+
+    warp::serve(routes)
+        .run(([0, 0, 0, 0], 3000))
+        .await;
 }
 
 fn with_groups(
@@ -291,3 +306,26 @@ fn with_groups(
 ) -> impl Filter<Extract = (Groups,), Error = std::convert::Infallible> + Clone {
     warp::any().map(move || groups.clone())
 }
+// ─────────────────────────────────────────────────────────────
+// TODO (modello MLS semplificato)
+//
+// Questo server usa OpenMLS solo come "generatore" di segreti
+// per l'epoch corrente (export_secret), senza implementare
+// il protocollo MLS completo (Add / Commit / Welcome / Remove).
+//
+// Attualmente:
+//   - ad ogni nuovo join:
+//       * l'epoch viene incrementata manualmente
+//       * viene generato un nuovo master_secret casuale
+//   - i peer già nel gruppo si riallineano richiamando /mls/join
+//     (via mlsResync lato webapp)
+//
+// In una implementazione MLS completa:
+//   - l'epoch cambierebbe solo a seguito di Commit validi
+//   - il master_secret deriverebbe dalla ratchet MLS condivisa
+//   - join/leave sarebbero gestiti tramite Add/Remove/Welcome
+//   - il server non dovrebbe "inventare" epoch o segreti
+//
+// Questa implementazione è intenzionalmente semplificata
+// per isolare e studiare l'integrazione MLS → SFrame → WebRTC.
+// ─────────────────────────────────────────────────────────────

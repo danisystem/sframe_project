@@ -11,6 +11,8 @@
       color: #e5e7eb;
     }
 
+    /* ---------------- TOP BAR ---------------- */
+
     .topbar {
       display: flex;
       flex-wrap: wrap;
@@ -24,10 +26,15 @@
 
     .topbar label {
       display: flex;
-      align-items: center;
-      gap: 0.35rem;
+      flex-direction: column;
+      gap: 0.15rem;
       color: #e5e7eb;
       white-space: nowrap;
+    }
+
+    .topbar label > span {
+      font-size: 11px;
+      color: #9ca3af;
     }
 
     .topbar input {
@@ -51,6 +58,7 @@
       color: #e5e7eb;
       cursor: pointer;
       font-size: 13px;
+      white-space: nowrap;
     }
 
     .topbar button:disabled {
@@ -70,11 +78,26 @@
       border: 1px solid #4b5563;
       background: #111827;
       color: #9ca3af;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      text-align: right;
+    }
+
+    .badge strong {
+      font-size: 11px;
+      color: #e5e7eb;
+      font-weight: 600;
+    }
+
+    .badge small {
+      font-size: 10px;
+      color: #9ca3af;
     }
 
     .invite-box {
       display: flex;
-      align-items: center;
+      align-items: flex-end;
       gap: 0.35rem;
       flex: 1 1 260px;
       min-width: 260px;
@@ -84,6 +107,8 @@
       flex: 1;
       min-width: 0;
     }
+
+    /* ---------------- LAYOUT ---------------- */
 
     .layout {
       display: grid;
@@ -100,12 +125,28 @@
       gap: 0.75rem;
     }
 
+    h1.page-title {
+      margin: 0;
+      padding: 0.5rem 1rem 0.25rem;
+      font-size: 18px;
+      font-weight: 600;
+      color: #e5e7eb;
+    }
+
+    .page-subtitle {
+      padding: 0 1rem 0.5rem;
+      font-size: 12px;
+      color: #9ca3af;
+    }
+
     h2 {
       margin: 0;
       font-size: 16px;
       font-weight: 600;
       color: #e5e7eb;
     }
+
+    /* ---------------- VIDEO & PANELS ---------------- */
 
     #localVideo {
       width: 100%;
@@ -176,6 +217,8 @@
       padding: 0.1rem 0;
     }
 
+    /* ---------------- LOG PANEL ---------------- */
+
     .log-controls {
       display: flex;
       align-items: center;
@@ -204,7 +247,8 @@
       background: #020617;
       color: #e5e7eb;
       padding: 0.6rem;
-      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+        "Liberation Mono", "Courier New", monospace;
       font-size: 12px;
       box-sizing: border-box;
       min-height: 0;
@@ -231,6 +275,45 @@
       color: white;
     }
 
+    /* ---------------- OVERLAY & TOAST (usati da appRoom.js) ---------------- */
+
+    #keySyncOverlay {
+      position: fixed;
+      top: 10px;
+      right: 10px;
+      z-index: 9999;
+      background: rgba(15, 23, 42, 0.9);
+      color: #e5e7eb;
+      padding: 8px 12px;
+      border-radius: 999px;
+      font-size: 12px;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+      pointer-events: none;
+      display: none; /* il JS la mostra/nasconde */
+    }
+
+    #toastContainer {
+      position: fixed;
+      bottom: 16px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 9998;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      pointer-events: none;
+    }
+
+    /* I toast sono creati via JS, qui solo stile generico */
+    #toastContainer .toast {
+      background: rgba(15, 23, 42, 0.95);
+      color: #e5e7eb;
+      padding: 6px 10px;
+      border-radius: 999px;
+      font-size: 13px;
+      box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
+    }
+
     @media (max-width: 1100px) {
       .topbar {
         align-items: flex-start;
@@ -241,28 +324,35 @@
       .layout {
         grid-template-columns: minmax(0, 1fr);
       }
+
+      .badge {
+        margin-left: 0;
+      }
     }
   </style>
 </head>
 <body>
   <div class="topbar">
-    <label>WSS URL:
+    <label>
+      <span>WSS URL</span>
       <input id="wsUrl" size="26" value="wss://sframe.local/janus">
     </label>
 
-    <label>Room:
+    <label>
+      <span>Room</span>
       <input id="roomId" size="6" value="" readonly>
     </label>
 
     <div class="invite-box">
       <label style="flex:1;">
-        Invite link:
+        <span>Invite link</span>
         <input id="inviteLink" type="text" readonly>
       </label>
       <button id="btnCopyInvite" type="button">Copy</button>
     </div>
 
-    <label>Nome/Identity:
+    <label>
+      <span>Nome / Identity</span>
       <input id="displayName" size="10" value="">
     </label>
 
@@ -271,13 +361,21 @@
     <button id="btnToggleMic" disabled>Mic OFF</button>
     <button id="btnToggleCam" disabled>Cam OFF</button>
 
-    <span class="badge">SFrame via wasm + MLS</span>
+    <div class="badge">
+      <strong>SFrame via WASM</strong>
+      <small>MLS + Janus VideoRoom</small>
+    </div>
+  </div>
+
+  <h1 class="page-title">Multi-room E2EE demo</h1>
+  <div class="page-subtitle">
+    WebRTC + Janus SFU + SFrame (WASM) con keying gestito da MLS.
   </div>
 
   <div class="layout">
     <div class="col">
       <div class="panel">
-        <h2>Local</h2>
+        <h2>Local preview</h2>
         <video id="localVideo" autoplay playsinline muted></video>
       </div>
 
@@ -305,6 +403,12 @@
       </div>
     </div>
   </div>
+
+  <!-- Overlay per "key sync in progress" (gestito da appRoom.js) -->
+  <div id="keySyncOverlay"></div>
+
+  <!-- Container per i toast "X si è unito" (riempito da appRoom.js) -->
+  <div id="toastContainer"></div>
 
   <!-- Carico SOLO appRoom.js: lui importa tutto il resto -->
   <script type="module" src="./appRoom.js"></script>
