@@ -1,122 +1,75 @@
 // src/mls_client.rs
-//
-// MLS-LITE client locale per WASM.
-// Non manteniamo un vero gruppo OpenMLS: usiamo una PSK esterna + room_id + epoch
-// per derivare una master key SFrame tramite HKDF.
-//
-// Questo modulo è pensato per essere usato da lib.rs (esportato verso JS tramite wasm-bindgen).
+#![cfg(target_arch = "wasm32")]
 
-use hkdf::Hkdf;
-use sha2::Sha256;
-use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine as _};
+use wasm_bindgen::prelude::*;
+use openmls::prelude::*;
+use openmls_rust_crypto::OpenMlsRustCrypto;
+use openmls_basic_credential::SignatureKeyPair;
+use std::sync::{Arc, Mutex};
 
-/// Client MLS "lite" locale dentro il WASM.
-///
-/// Campi minimi:
-/// - identity: nome dell'utente (es. "danilo")
-/// - room_id: stanza logica (es. 123456)
-/// - epoch: contatore logico (>=1 quando la sessione è attiva)
-/// - external_psk: chiave condivisa, mai inviata al server
-pub struct MlsClient {
+// Esportiamo la struct verso Javascript
+#[wasm_bindgen]
+pub struct WasmMlsClient {
     identity: String,
-    room_id: u32,
-    epoch: u64,
-    external_psk: Option<Vec<u8>>,
+    // OpenMLS richiede un "provider" crittografico per gestire lo stato e le chiavi in memoria
+    provider: OpenMlsRustCrypto,
+    credential_with_key: CredentialWithKey,
+    signature_keypair: SignatureKeyPair,
 }
 
-impl MlsClient {
-    /// Crea un nuovo client MLS locale con identity + room_id.
-    /// L'epoch parte da 0 (non ancora "attivo").
-    pub fn new(identity: String, room_id: u32) -> Self {
-        Self {
-            identity,
-            room_id,
-            epoch: 0,
-            external_psk: None,
-        }
+#[wasm_bindgen]
+impl WasmMlsClient {
+    /// Inizializza un nuovo client MLS in memoria per questo utente
+    #[wasm_bindgen(constructor)]
+    pub fn new(identity: &str) -> Result<WasmMlsClient, JsValue> {
+        let provider = OpenMlsRustCrypto::default();
+        let ciphersuite = Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519;
+
+        // 1. Creiamo la credenziale (l'identità dell'utente)
+        let cred = BasicCredential::new(identity.as_bytes().to_vec());
+        
+        // 2. Generiamo la coppia di chiavi asimmetriche (Privata/Pubblica) salvate in memoria
+        let sig_keypair = SignatureKeyPair::new(ciphersuite.signature_algorithm())
+            .map_err(|_| JsValue::from_str("Errore generazione chiavi MLS"))?;
+
+        let credential_with_key = CredentialWithKey {
+            credential: cred.into(),
+            signature_key: sig_keypair.public().into(),
+        };
+
+        Ok(Self {
+            identity: identity.to_string(),
+            provider,
+            credential_with_key,
+            signature_keypair: sig_keypair,
+        })
     }
 
-    /// Imposta la PSK condivisa, passata in Base64.
-    /// La PSK viene tenuta solo lato client (WASM).
-    pub fn set_external_psk_b64(&mut self, psk_b64: String) -> Result<(), String> {
-        let psk_b64_trimmed = psk_b64.trim();
-
-        if psk_b64_trimmed.is_empty() {
-            return Err("PSK Base64 vuota".to_string());
-        }
-
-        let bytes = base64::decode(psk_b64_trimmed)
-            .map_err(|e| format!("Errore decode PSK Base64: {e}"))?;
-
-        if bytes.is_empty() {
-            return Err("PSK decodificata è vuota".to_string());
-        }
-
-        self.external_psk = Some(bytes);
-        Ok(())
+    /// Step 1: Genera il KeyPackage (la chiave pubblica da mandare al server)
+    #[wasm_bindgen]
+    pub fn generate_key_package(&self) -> Result<Vec<u8>, JsValue> {
+        // ... (qui implementeremo la generazione del KeyPackage OpenMLS) ...
+        Ok(vec![]) // Placeholder per ora
     }
 
-    /// Imposta direttamente l'epoch (>=1 quando la sessione è attiva).
-    pub fn set_epoch(&mut self, epoch: u64) {
-        self.epoch = epoch;
+    /// Step 2 (Creatore): Crea il gruppo e restituisce il master_secret
+    #[wasm_bindgen]
+    pub fn create_group(&mut self) -> Result<Vec<u8>, JsValue> {
+        // ... (qui creeremo l'MlsGroup ed estrarremo l'export_secret) ...
+        Ok(vec![]) // Placeholder
     }
 
-    /// Incrementa l'epoch e ritorna il nuovo valore.
-    pub fn bump_epoch(&mut self) -> u64 {
-        self.epoch = self.epoch.saturating_add(1);
-        self.epoch
+    /// Step 3 (Creatore): Aggiunge un KeyPackage e crea un Welcome message
+    #[wasm_bindgen]
+    pub fn add_member(&mut self, key_package_bytes: &[u8]) -> Result<Vec<u8>, JsValue> {
+        // ... (processa la chiave dell'altro utente e cifra il segreto per lui) ...
+        Ok(vec![]) // Placeholder
     }
 
-    /// Ritorna l'epoch corrente.
-    pub fn epoch_u64(&self) -> u64 {
-        self.epoch
-    }
-
-    /// Ritorna true se:
-    /// - abbiamo una PSK impostata
-    /// - epoch > 0
-    pub fn has_group(&self) -> bool {
-        self.external_psk.is_some() && self.epoch > 0
-    }
-
-    /// Deriva la master key SFrame (32 byte) come HKDF(PSK, info(room_id, epoch)).
-    ///
-    /// Questa sostituisce il vecchio master_secret del server.
-    pub fn export_sframe_master_b64(&self) -> Result<String, String> {
-        let psk = self
-            .external_psk
-            .as_ref()
-            .ok_or_else(|| "PSK non impostata (chiama mls_set_external_psk_b64 prima)".to_string())?;
-
-        if self.epoch == 0 {
-            return Err("Epoch = 0 (chiama mls_set_epoch / mls_bump_epoch prima)".to_string());
-        }
-
-        // Costruiamo l'info per HKDF (puoi cambiare il formato se vuoi):
-        // "sframe/master|room:<room_id>|epoch:<epoch>"
-        let info = format!("sframe/master|room:{}|epoch:{}", self.room_id, self.epoch);
-        let info_bytes = info.as_bytes();
-
-        // HKDF-SHA256
-        let hk = Hkdf::<Sha256>::new(None, psk);
-        let mut okm = [0u8; 32];
-        hk.expand(info_bytes, &mut okm)
-            .map_err(|e| format!("HKDF expand failed: {e}"))?;
-
-        // Encode in Base64 (senza padding, ma va bene anche con padding se preferisci)
-        let b64 = STANDARD_NO_PAD.encode(okm);
-
-        Ok(b64)
-    }
-
-    // (facoltativo) getter di debug se ti serve in futuro
-    #[allow(dead_code)]
-    pub fn identity(&self) -> &str {
-        &self.identity
-    }
-
-    #[allow(dead_code)]
-    pub fn room_id(&self) -> u32 {
-        self.room_id
+    /// Step 4 (Joiner): Usa il Welcome message per entrare nel gruppo e ottenere il master_secret
+    #[wasm_bindgen]
+    pub fn process_welcome(&mut self, welcome_bytes: &[u8]) -> Result<Vec<u8>, JsValue> {
+        // ... (usa la chiave privata locale per decifrare il welcome) ...
+        Ok(vec![]) // Placeholder
     }
 }

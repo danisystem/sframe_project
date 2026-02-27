@@ -140,9 +140,7 @@ async fn handle_join(
     });
 
     // identity già presente in questa room? → riusa index
-    if let Some(existing) =
-        gs.roster.iter().find(|m| m.identity == identity)
-    {
+    if let Some(existing) = gs.roster.iter().find(|m| m.identity == identity) {
         let master_b64 =
             base64::engine::general_purpose::STANDARD.encode(&gs.master_secret);
 
@@ -171,6 +169,7 @@ async fn handle_join(
         return Ok(warp::reply::json(&resp));
     }
 
+    // --- NUOVO UTENTE ---
     // nuova identity per questa room → assegna nuovo index
     let new_idx = gs.roster.len() as u32;
 
@@ -179,14 +178,13 @@ async fn handle_join(
         identity: identity.clone(),
     });
 
-    // NEW: cambio di epoch + nuovo master_secret ad ogni nuovo join
-    {
-        let new_gs = make_group_state();
-
-        gs.epoch = gs.epoch.saturating_add(1);
-        gs.master_secret = new_gs.master_secret;
-        // group_id lo lasciamo invariato per questa stanza
-    }
+    // Cambio di epoch + nuovo master_secret ad ogni nuovo join
+    let new_gs = make_group_state();
+    gs.epoch = gs.epoch.saturating_add(1);
+    
+    // Assegnamo il nuovo master_secret e cloniamolo per l'encode B64
+    gs.master_secret = new_gs.master_secret.clone(); 
+    // Il group_id resta quello originale della stanza
 
     let master_b64 =
         base64::engine::general_purpose::STANDARD.encode(&gs.master_secret);
@@ -202,7 +200,7 @@ async fn handle_join(
         room_id,
         master_secret: master_b64,
         sender_index: new_idx,
-        roster: gs.roster.clone(),
+        roster: gs.roster.clone(), // Inviamo il roster aggiornato col nuovo utente
     };
 
     println!(
@@ -306,6 +304,7 @@ fn with_groups(
 ) -> impl Filter<Extract = (Groups,), Error = std::convert::Infallible> + Clone {
     warp::any().map(move || groups.clone())
 }
+
 // ─────────────────────────────────────────────────────────────
 // TODO (modello MLS semplificato)
 //
