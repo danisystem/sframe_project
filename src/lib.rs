@@ -4,7 +4,7 @@
 use wasm_bindgen::prelude::*;
 use sframe::{CipherSuite, header::SframeHeader};
 use serde::Serialize;
-
+pub mod mls_client;
 
 mod sender;
 mod receiver;

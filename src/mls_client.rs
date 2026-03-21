@@ -5,71 +5,107 @@ use wasm_bindgen::prelude::*;
 use openmls::prelude::*;
 use openmls_rust_crypto::OpenMlsRustCrypto;
 use openmls_basic_credential::SignatureKeyPair;
-use std::sync::{Arc, Mutex};
+use tls_codec::{Deserialize, Serialize};
 
-// Esportiamo la struct verso Javascript
+use openmls_traits::OpenMlsProvider;
+use openmls_traits::storage::StorageProvider;
+
 #[wasm_bindgen]
 pub struct WasmMlsClient {
     identity: String,
-    // OpenMLS richiede un "provider" crittografico per gestire lo stato e le chiavi in memoria
     provider: OpenMlsRustCrypto,
-    credential_with_key: CredentialWithKey,
     signature_keypair: SignatureKeyPair,
+    group: Option<MlsGroup>,
 }
 
 #[wasm_bindgen]
 impl WasmMlsClient {
-    /// Inizializza un nuovo client MLS in memoria per questo utente
     #[wasm_bindgen(constructor)]
     pub fn new(identity: &str) -> Result<WasmMlsClient, JsValue> {
         let provider = OpenMlsRustCrypto::default();
         let ciphersuite = Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519;
-
-        // 1. Creiamo la credenziale (l'identità dell'utente)
-        let cred = BasicCredential::new(identity.as_bytes().to_vec());
+        let signature_keypair = SignatureKeyPair::new(ciphersuite.signature_algorithm())
+            .map_err(|_| JsValue::from_str("Errore chiavi"))?;
         
-        // 2. Generiamo la coppia di chiavi asimmetriche (Privata/Pubblica) salvate in memoria
-        let sig_keypair = SignatureKeyPair::new(ciphersuite.signature_algorithm())
-            .map_err(|_| JsValue::from_str("Errore generazione chiavi MLS"))?;
-
-        let credential_with_key = CredentialWithKey {
-            credential: cred.into(),
-            signature_key: sig_keypair.public().into(),
-        };
-
         Ok(Self {
             identity: identity.to_string(),
             provider,
-            credential_with_key,
-            signature_keypair: sig_keypair,
+            signature_keypair,
+            group: None,
         })
     }
 
-    /// Step 1: Genera il KeyPackage (la chiave pubblica da mandare al server)
     #[wasm_bindgen]
-    pub fn generate_key_package(&self) -> Result<Vec<u8>, JsValue> {
-        // ... (qui implementeremo la generazione del KeyPackage OpenMLS) ...
-        Ok(vec![]) // Placeholder per ora
+    pub fn generate_key_package(&mut self) -> Result<Vec<u8>, JsValue> {
+        let ciphersuite = Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519;
+        let credential = BasicCredential::new(self.identity.as_bytes().to_vec());
+        let credential_with_key = CredentialWithKey {
+            credential: credential.into(),
+            signature_key: self.signature_keypair.public().into(),
+        };
+
+        let kp_bundle = KeyPackage::builder()
+            .build(ciphersuite, &self.provider, &self.signature_keypair, credential_with_key)
+            .map_err(|_| JsValue::from_str("Errore builder KP"))?;
+
+        let kp = kp_bundle.key_package();
+        let kp_ref = kp.hash_ref(self.provider.crypto()).unwrap();
+        
+        self.provider.storage().write_key_package(&kp_ref, &kp_bundle).unwrap();
+
+        web_sys::console::log_1(&"[RUST-WASM] KeyPackage generato e salvato nel Provider!".into());
+        kp.tls_serialize_detached().map_err(|_| JsValue::from_str("Errore ser"))
     }
 
-    /// Step 2 (Creatore): Crea il gruppo e restituisce il master_secret
     #[wasm_bindgen]
-    pub fn create_group(&mut self) -> Result<Vec<u8>, JsValue> {
-        // ... (qui creeremo l'MlsGroup ed estrarremo l'export_secret) ...
-        Ok(vec![]) // Placeholder
+    pub fn process_welcome(&mut self, welcome_bytes: &[u8]) -> Result<(), JsValue> {
+        let welcome = Welcome::tls_deserialize(&mut &welcome_bytes[..])
+            .map_err(|_| JsValue::from_str("Welcome corrotto"))?;
+
+        let join_config = MlsGroupJoinConfig::builder().use_ratchet_tree_extension(true).build();
+
+        web_sys::console::log_1(&"[RUST-WASM] Tento di decifrare il Welcome...".into());
+
+        let staged_welcome = StagedWelcome::new_from_welcome(&self.provider, &join_config, welcome, None)
+            .map_err(|e| JsValue::from_str(&format!("Errore StagedWelcome: {:?}", e)))?;
+
+        let group = staged_welcome.into_group(&self.provider)
+            .map_err(|e| JsValue::from_str(&format!("Errore IntoGroup: {:?}", e)))?;
+
+        self.group = Some(group);
+        web_sys::console::log_1(&"[RUST-WASM] Welcome APERTO CON SUCCESSO!".into());
+        Ok(())
     }
 
-    /// Step 3 (Creatore): Aggiunge un KeyPackage e crea un Welcome message
     #[wasm_bindgen]
-    pub fn add_member(&mut self, key_package_bytes: &[u8]) -> Result<Vec<u8>, JsValue> {
-        // ... (processa la chiave dell'altro utente e cifra il segreto per lui) ...
-        Ok(vec![]) // Placeholder
+    pub fn create_group(&mut self) -> Result<(), JsValue> {
+        let config = MlsGroupCreateConfig::builder().use_ratchet_tree_extension(true).build();
+        let credential = BasicCredential::new(self.identity.as_bytes().to_vec());
+        let credential_with_key = CredentialWithKey {
+            credential: credential.into(),
+            signature_key: self.signature_keypair.public().into(),
+        };
+
+        let group = MlsGroup::new(&self.provider, &self.signature_keypair, &config, credential_with_key).unwrap();
+        self.group = Some(group);
+        Ok(())
     }
 
-    /// Step 4 (Joiner): Usa il Welcome message per entrare nel gruppo e ottenere il master_secret
     #[wasm_bindgen]
-    pub fn process_welcome(&mut self, welcome_bytes: &[u8]) -> Result<Vec<u8>, JsValue> {
-        // ... (usa la chiave privata locale per decifrare il welcome) ...
-        Ok(vec![]) // Placeholder
+    pub fn add_member(&mut self, kp_bytes: &[u8]) -> Result<Vec<u8>, JsValue> {
+        let group = self.group.as_mut().unwrap();
+        let kp = KeyPackageIn::tls_deserialize(&mut &kp_bytes[..]).unwrap()
+            .validate(self.provider.crypto(), ProtocolVersion::Mls10).unwrap();
+        
+        let (_commit, welcome, _) = group.add_members(&self.provider, &self.signature_keypair, &[kp]).unwrap();
+        group.merge_pending_commit(&self.provider).unwrap();
+        welcome.tls_serialize_detached().map_err(|_| JsValue::from_str("Errore ser"))
+    }
+
+    #[wasm_bindgen]
+    pub fn get_master_secret(&self) -> Result<Vec<u8>, JsValue> {
+        let group = self.group.as_ref().unwrap();
+        let secret = group.export_secret(self.provider.crypto(), "SFRAME_MASTER", &[], 32).unwrap();
+        Ok(secret)
     }
 }

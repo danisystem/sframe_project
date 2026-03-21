@@ -5,6 +5,7 @@
 
 import initWasm, {
   WasmPeer,
+  WasmMlsClient, // <-- NUOVO: Importiamo il client MLS E2EE
   sframe_inspect,
 } from "./pkg/sframe_core.js";
 
@@ -34,6 +35,7 @@ export async function initSFrame() {
 
       window.SFRAME = {
         WasmPeer,
+        WasmMlsClient, // <-- NUOVO: Esponiamo il client MLS alla webapp
         inspect: sframe_inspect,
       };
 

@@ -1,7 +1,7 @@
 [package]
 name = "sframe_test"
 version = "0.1.0"
-edition = "2024"   # su Mac puoi usare anche "2021" se avessi warning
+edition = "2024"
 
 [features]
 # Backend crittografici sframe
@@ -26,12 +26,12 @@ native = [
 # Segnaposto per build web/wasm
 web = []
 
-# Default: come prima + parte native attiva
+# Default: parte native attiva + sframe-rust-crypto
 default = ["sframe-rust-crypto", "native"]
 
 [lib]
 name = "sframe_core"
-crate-type = ["rlib", "cdylib"]   # rlib per i binari, cdylib per wasm-bindgen
+crate-type = ["rlib", "cdylib"]
 
 [dependencies]
 anyhow = "1"
@@ -45,7 +45,7 @@ sha2 = "0.10"
 getrandom = { version = "0.2", features = ["js"] }
 rand = "0.8"
 
-# SFrame dal tuo repo, senza default features
+# SFrame dal tuo repo
 sframe = { git = "https://github.com/TobTheRock/sframe-rs.git", branch = "main", default-features = false }
 
 # ── Dipendenze NATIVE rese opzionali ────────────────────────────────────────────
@@ -61,33 +61,25 @@ ctrlc       = { version = "3", optional = true }
 simple_logger = { version = "5", optional = true }
 
 env_logger = "0.11"
-tls_codec = "0.4"
+tls_codec = { version = "0.4", features = ["derive"] }
 
-# ── Dipendenze SOLO per wasm ───────────────────────────────────────────────────
+# ── Dipendenze SPECIFICHE per WASM (Armonizzate per OpenMLS 0.8.1) ──────────────
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = { version = "0.2.105", features = ["serde-serialize"] }
+js-sys = "0.3"
 serde = { version = "1.0", features = ["derive"] }
 serde-wasm-bindgen = "0.6"
-
-# OpenMLS (WASM): serve la feature "js"
-openmls = { version = "0.7.1", features = ["js"] }
-openmls_basic_credential = "0.4.1"
-openmls_rust_crypto = "0.4.1"
-openmls_traits = "0.4.1"
-
-base64 = "0.22"
 serde_json = "1.0"
-
+base64 = "0.22"
 hkdf = "0.12"
-sha2 = "0.10"
-
-# (opzionale, ma spesso utile averlo esplicito)
-tls_codec = "0.4"
-
-# 🆕 per MlsClient (stato globale + log in console)
 once_cell = "1.19"
-web-sys = { version = "0.3", features = ["console"] }
+web-sys = { version = "0.3", features = ["console", "Window", "Storage"] }
 
+#CONFIGURAZIONE 0.8.1 COMPLETA
+openmls = { version = "0.8.1", features = ["js"] }
+openmls_rust_crypto = "0.5.1"
+openmls_traits = "0.5.0"
+openmls_basic_credential = "0.5.0"
 
 [[bin]]
 name = "tx_audio"

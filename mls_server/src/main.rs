@@ -1,40 +1,52 @@
 // ─────────────────────────────────────────────────────────────
-// MLS SERVER – Export per SFrame WebApp + Roster endpoint (multi-room)
+// MLS SERVER – Delivery Service E2EE (Postino Cieco)
 // ─────────────────────────────────────────────────────────────
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use warp::Filter;
 use serde::{Serialize, Deserialize};
-use openmls::prelude::*;
-use openmls_basic_credential::SignatureKeyPair;
-use openmls_rust_crypto::OpenMlsRustCrypto;
-use base64::Engine;
 
 // ─────────────────────────────────────────────────────────────
-// STRUCTS
+// STRUCTS (Le "Lettere" che il postino gestisce)
 // ─────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize)]
 struct MemberEntry {
     index: u32,
     identity: String,
+    // Il KeyPackage pubblico generato dal client (in Base64)
+    key_package: String, 
+    // Il Welcome message cifrato destinato a questo utente (in Base64)
+    welcome_message: Option<String>, 
 }
 
 #[derive(Debug, Deserialize)]
 struct JoinRequest {
     identity: String,
     room_id: u32,
+    key_package: String, // Ora il client DEVE inviare il suo pacchetto
 }
 
 #[derive(Debug, Serialize)]
 struct JoinResponse {
     epoch: u64,
-    group_id: String,
     room_id: u32,
-    master_secret: String,
     sender_index: u32,
+    is_creator: bool, // Diciamo al client se è il primo (deve creare lui il gruppo!)
     roster: Vec<MemberEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WelcomeRequest {
+    room_id: u32,
+    target_identity: String,
+    welcome_message: String,
+}
+
+#[derive(Debug, Serialize)]
+struct GenericResponse {
+    success: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -45,7 +57,6 @@ struct RosterQuery {
 #[derive(Debug, Serialize)]
 struct RosterResponse {
     epoch: u64,
-    group_id: String,
     room_id: u32,
     roster: Vec<MemberEntry>,
 }
@@ -53,14 +64,12 @@ struct RosterResponse {
 #[derive(Clone)]
 struct GroupState {
     epoch: u64,
-    master_secret: Vec<u8>,
-    group_id: Vec<u8>,
     roster: Vec<MemberEntry>,
 }
 
 #[derive(Clone)]
 struct Groups {
-    // room_id → stato MLS per quella stanza
+    // room_id → stato della stanza
     inner: Arc<Mutex<HashMap<u32, GroupState>>>,
 }
 
@@ -72,152 +81,86 @@ impl Groups {
     }
 }
 
-// helper: crea un nuovo gruppo MLS e ne estrae master_secret/epoch/group_id
-fn make_group_state() -> GroupState {
-    let provider = OpenMlsRustCrypto::default();
-    let ciphersuite =
-        Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519;
-
-    let cred = BasicCredential::new(b"server".to_vec());
-    let sig = SignatureKeyPair::new(ciphersuite.signature_algorithm())
-        .expect("signature keypair");
-
-    let credential_with_key = CredentialWithKey {
-        credential: cred.into(),
-        signature_key: sig.public().into(),
-    };
-
-    let config = MlsGroupCreateConfig::builder()
-        .use_ratchet_tree_extension(true)
-        .build();
-
-    let group = MlsGroup::new(
-        &provider,
-        &sig,
-        &config,
-        credential_with_key,
-    )
-    .expect("group create");
-
-    let master = group
-        .export_secret(provider.crypto(), "SFRAME_MASTER", &[], 32)
-        .expect("export master");
-
-    let epoch = group.epoch().as_u64();
-    let gid = group.group_id().to_vec();
-
-    let roster = vec![
-        MemberEntry {
-            index: 0,
-            identity: "server".to_owned(),
-        }
-    ];
-
-    GroupState {
-        epoch,
-        master_secret: master,
-        group_id: gid,
-        roster,
-    }
-}
-
 // ─────────────────────────────────────────────────────────────
-// HANDLER JOIN (POST /mls/join)
+// HANDLERS
 // ─────────────────────────────────────────────────────────────
 
+// 1. Un utente entra e deposita il suo KeyPackage
 async fn handle_join(
     req: JoinRequest,
     groups: Groups,
 ) -> Result<impl warp::Reply, warp::Rejection> {
-    let JoinRequest { identity, room_id } = req;
-
     let mut map = groups.inner.lock().unwrap();
 
-    // prendi (o crea) il gruppo per questa room
-    let gs = map.entry(room_id).or_insert_with(|| {
-        println!("[MLS] creating new group for room {}", room_id);
-        make_group_state()
+    let gs = map.entry(req.room_id).or_insert_with(|| {
+        println!("[MLS-DS] Stanza {} creata", req.room_id);
+        GroupState {
+            epoch: 1,
+            roster: vec![],
+        }
     });
 
-    // identity già presente in questa room? → riusa index
-    if let Some(existing) = gs.roster.iter().find(|m| m.identity == identity) {
-        let master_b64 =
-            base64::engine::general_purpose::STANDARD.encode(&gs.master_secret);
+    let is_creator = gs.roster.is_empty();
 
-        let gid_hex = gs.group_id
-            .iter()
-            .map(|b| format!("{:02x}", b))
-            .collect::<String>();
-
-        let resp = JoinResponse {
+    // Se l'utente esiste già, aggiorniamo il suo KeyPackage (magari ha ricaricato la pagina)
+    if let Some(existing) = gs.roster.iter_mut().find(|m| m.identity == req.identity) {
+        existing.key_package = req.key_package.clone();
+        existing.welcome_message = None; // Resettiamo eventuali vecchi inviti
+        
+        println!("[MLS-DS] Re-join room={} identity={} index={}", req.room_id, req.identity, existing.index);
+        
+        return Ok(warp::reply::json(&JoinResponse {
             epoch: gs.epoch,
-            group_id: gid_hex,
-            room_id,
-            master_secret: master_b64,
+            room_id: req.room_id,
             sender_index: existing.index,
+            is_creator,
             roster: gs.roster.clone(),
-        };
-
-        println!(
-            "[MLS] re-join room={} identity={} → sender_index={} (epoch={})",
-            room_id,
-            existing.identity,
-            existing.index,
-            gs.epoch
-        );
-
-        return Ok(warp::reply::json(&resp));
+        }));
     }
 
-    // --- NUOVO UTENTE ---
-    // nuova identity per questa room → assegna nuovo index
+    // Nuovo utente
     let new_idx = gs.roster.len() as u32;
-
     gs.roster.push(MemberEntry {
         index: new_idx,
-        identity: identity.clone(),
+        identity: req.identity.clone(),
+        key_package: req.key_package,
+        welcome_message: None, // Aspetta che il creatore gli mandi l'invito
     });
 
-    // Cambio di epoch + nuovo master_secret ad ogni nuovo join
-    let new_gs = make_group_state();
-    gs.epoch = gs.epoch.saturating_add(1);
-    
-    // Assegnamo il nuovo master_secret e cloniamolo per l'encode B64
-    gs.master_secret = new_gs.master_secret.clone(); 
-    // Il group_id resta quello originale della stanza
+    // NOTA: Non avanziamo l'epoch qui. L'epoch avanza quando il creatore carica il Welcome.
 
-    let master_b64 =
-        base64::engine::general_purpose::STANDARD.encode(&gs.master_secret);
+    println!("[MLS-DS] Nuovo join room={} identity={} index={}", req.room_id, req.identity, new_idx);
 
-    let gid_hex = gs.group_id
-        .iter()
-        .map(|b| format!("{:02x}", b))
-        .collect::<String>();
-
-    let resp = JoinResponse {
+    Ok(warp::reply::json(&JoinResponse {
         epoch: gs.epoch,
-        group_id: gid_hex,
-        room_id,
-        master_secret: master_b64,
+        room_id: req.room_id,
         sender_index: new_idx,
-        roster: gs.roster.clone(), // Inviamo il roster aggiornato col nuovo utente
-    };
-
-    println!(
-        "[MLS] new join room={} identity={} → sender_index={} (epoch={})",
-        room_id,
-        identity,
-        new_idx,
-        gs.epoch
-    );
-
-    Ok(warp::reply::json(&resp))
+        is_creator,
+        roster: gs.roster.clone(),
+    }))
 }
 
-// ─────────────────────────────────────────────────────────────
-// HANDLER ROSTER (GET /mls/roster?room_id=1234)
-// ─────────────────────────────────────────────────────────────
+// 2. Il creatore carica un Welcome message per un nuovo utente
+async fn handle_welcome(
+    req: WelcomeRequest,
+    groups: Groups,
+) -> Result<impl warp::Reply, warp::Rejection> {
+    let mut map = groups.inner.lock().unwrap();
 
+    if let Some(gs) = map.get_mut(&req.room_id) {
+        if let Some(target) = gs.roster.iter_mut().find(|m| m.identity == req.target_identity) {
+            target.welcome_message = Some(req.welcome_message);
+            gs.epoch += 1; // Un utente è stato aggiunto ufficialmente, l'epoch avanza!
+            
+            println!("[MLS-DS] Welcome caricato per {} in room {} (Nuova Epoch: {})", req.target_identity, req.room_id, gs.epoch);
+            return Ok(warp::reply::json(&GenericResponse { success: true }));
+        }
+    }
+
+    Ok(warp::reply::json(&GenericResponse { success: false }))
+}
+
+// 3. I client chiedono la lista dei partecipanti (e controllano la posta)
 async fn handle_roster(
     query: RosterQuery,
     groups: Groups,
@@ -225,41 +168,17 @@ async fn handle_roster(
     let map = groups.inner.lock().unwrap();
 
     if let Some(gs) = map.get(&query.room_id) {
-        let gid_hex = gs.group_id
-            .iter()
-            .map(|b| format!("{:02x}", b))
-            .collect::<String>();
-
-        let resp = RosterResponse {
+        Ok(warp::reply::json(&RosterResponse {
             epoch: gs.epoch,
-            group_id: gid_hex,
             room_id: query.room_id,
             roster: gs.roster.clone(),
-        };
-
-        println!(
-            "[MLS] roster requested room={} → epoch={}, members={}",
-            query.room_id,
-            gs.epoch,
-            gs.roster.len()
-        );
-
-        Ok(warp::reply::json(&resp))
+        }))
     } else {
-        // room mai usata: roster vuoto
-        let resp = RosterResponse {
+        Ok(warp::reply::json(&RosterResponse {
             epoch: 0,
-            group_id: String::new(),
             room_id: query.room_id,
             roster: vec![],
-        };
-
-        println!(
-            "[MLS] roster requested room={} → NO GROUP (empty)",
-            query.room_id
-        );
-
-        Ok(warp::reply::json(&resp))
+        }))
     }
 }
 
@@ -277,6 +196,12 @@ async fn main() {
         .and(with_groups(groups.clone()))
         .and_then(handle_join);
 
+    let welcome_route = warp::path!("mls" / "welcome")
+        .and(warp::post())
+        .and(warp::body::json())
+        .and(with_groups(groups.clone()))
+        .and_then(handle_welcome);
+
     let roster_route = warp::path!("mls" / "roster")
         .and(warp::get())
         .and(warp::query::<RosterQuery>())
@@ -289,10 +214,11 @@ async fn main() {
         .allow_methods(vec!["GET", "POST"]);
 
     let routes = join_route
+        .or(welcome_route)
         .or(roster_route)
         .with(cors);
 
-    println!("MLS server running on http://0.0.0.0:3000");
+    println!("MLS Delivery Service running on http://0.0.0.0:3000");
 
     warp::serve(routes)
         .run(([0, 0, 0, 0], 3000))
@@ -304,27 +230,3 @@ fn with_groups(
 ) -> impl Filter<Extract = (Groups,), Error = std::convert::Infallible> + Clone {
     warp::any().map(move || groups.clone())
 }
-
-// ─────────────────────────────────────────────────────────────
-// TODO (modello MLS semplificato)
-//
-// Questo server usa OpenMLS solo come "generatore" di segreti
-// per l'epoch corrente (export_secret), senza implementare
-// il protocollo MLS completo (Add / Commit / Welcome / Remove).
-//
-// Attualmente:
-//   - ad ogni nuovo join:
-//       * l'epoch viene incrementata manualmente
-//       * viene generato un nuovo master_secret casuale
-//   - i peer già nel gruppo si riallineano richiamando /mls/join
-//     (via mlsResync lato webapp)
-//
-// In una implementazione MLS completa:
-//   - l'epoch cambierebbe solo a seguito di Commit validi
-//   - il master_secret deriverebbe dalla ratchet MLS condivisa
-//   - join/leave sarebbero gestiti tramite Add/Remove/Welcome
-//   - il server non dovrebbe "inventare" epoch o segreti
-//
-// Questa implementazione è intenzionalmente semplificata
-// per isolare e studiare l'integrazione MLS → SFrame → WebRTC.
-// ─────────────────────────────────────────────────────────────

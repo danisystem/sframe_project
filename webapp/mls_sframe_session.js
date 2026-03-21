@@ -1,199 +1,264 @@
 // mls_sframe_session.js
-// MLS → distribuzione segreti per SFrame (webapp, multi-room)
-
 import { hkdf } from "./hkdf.js";
 import { Output } from "./output.js";
 
-// Usiamo path relativi: ci pensa secure-server.js a fare da proxy verso 127.0.0.1:3000
 const SERVER_JOIN_PATH = "/mls/join";
 const SERVER_ROSTER_PATH = "/mls/roster";
+const SERVER_WELCOME_PATH = "/mls/welcome";
+
+let mlsClient = null;
+let ecdhKeyPair = null;
+let myPublicKeyBase64 = null;
+let myMasterSecret = null;
+
+// Helper per Base64 sicuro per array binari
+function bytesToBase64(bytes) {
+    let binary = '';
+    const len = bytes.byteLength;
+    for (let i = 0; i < len; i++) {
+        binary += String.fromCharCode(bytes[i]);
+    }
+    return btoa(binary);
+}
 
 function base64ToBytes(b64) {
-    if (typeof b64 !== "string") {
-        throw new Error("base64ToBytes: input non è una stringa");
+    if (!b64) return null;
+    const binString = atob(b64);
+    const buf = new Uint8Array(binString.length);
+    for (let i = 0; i < binString.length; i++) {
+        buf[i] = binString.charCodeAt(i);
     }
-    // FIX: Supporto per Base64URL (sostituisce - con + e _ con /)
-    // Così se il server Rust manda stringhe "URL safe", atob non va in crash.
-    const standardB64 = b64.replace(/-/g, '+').replace(/_/g, '/');
-    const bin = atob(standardB64);
-    const buf = new Uint8Array(bin.length);
-    for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
     return buf;
 }
 
-// ---------------- MLS JOIN ----------------
-//
-// Ogni join ora è per (room_id, identity):
-// - room_id = Room Janus (es. 123456)
-// - identity = "dani", "mac", ecc.
-//
-// NOTA concettuale:
-// Il campo master_secret è da intendersi come segreto *dell'epoch corrente*
-// per quella stanza. Quando in futuro il server MLS ruoterà l'epoch ad ogni
-// join/leave, questo valore cambierà e i client dovranno riallinearsi.
+// -----------------------------------------------------------------------------
+// WEBCRYPTO SALVAVITA
+// -----------------------------------------------------------------------------
+async function initCrypto() {
+    if (!ecdhKeyPair) {
+        ecdhKeyPair = await crypto.subtle.generateKey(
+            { name: "ECDH", namedCurve: "P-256" }, false, ["deriveBits"]
+        );
+        const pubKeyBuf = await crypto.subtle.exportKey("raw", ecdhKeyPair.publicKey);
+        myPublicKeyBase64 = bytesToBase64(new Uint8Array(pubKeyBuf));
+    }
+}
+
+async function encryptForUser(remotePubKeyBase64, secretBytes) {
+    const remoteKeyBuf = base64ToBytes(remotePubKeyBase64);
+    const remotePubKey = await crypto.subtle.importKey(
+        "raw", remoteKeyBuf, { name: "ECDH", namedCurve: "P-256" }, true, []
+    );
+    const sharedBits = await crypto.subtle.deriveBits(
+        { name: "ECDH", public: remotePubKey }, ecdhKeyPair.privateKey, 256
+    );
+    const aesKey = await crypto.subtle.importKey("raw", sharedBits, "AES-GCM", false, ["encrypt"]);
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const ct = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, aesKey, secretBytes);
+    return { iv: bytesToBase64(iv), ct: bytesToBase64(new Uint8Array(ct)) };
+}
+
+async function decryptWelcome(ivB64, ctB64, creatorPubKeyB64) {
+    const creatorKeyBuf = base64ToBytes(creatorPubKeyB64);
+    const creatorPubKey = await crypto.subtle.importKey(
+        "raw", creatorKeyBuf, { name: "ECDH", namedCurve: "P-256" }, true, []
+    );
+    const sharedBits = await crypto.subtle.deriveBits(
+        { name: "ECDH", public: creatorPubKey }, ecdhKeyPair.privateKey, 256
+    );
+    const aesKey = await crypto.subtle.importKey("raw", sharedBits, "AES-GCM", false, ["decrypt"]);
+    const decrypted = await crypto.subtle.decrypt(
+        { name: "AES-GCM", iv: base64ToBytes(ivB64) }, aesKey, base64ToBytes(ctB64)
+    );
+    return new Uint8Array(decrypted);
+}
+
+// -----------------------------------------------------------------------------
+// LOGICA IBRIDA
+// -----------------------------------------------------------------------------
+async function initMlsClient(identity) {
+    if (!mlsClient) {
+        mlsClient = new window.SFRAME.WasmMlsClient(identity);
+    }
+    return mlsClient;
+}
+
 export async function mlsJoin(identity, roomId) {
-    Output.mls("JOIN →", { identity, roomId });
+    Output.mls("Avvio procedura JOIN E2EE →", { identity, roomId });
+
+    // 1. Facciamo girare OpenMLS per la tesi
+    const client = await initMlsClient(identity);
+    let mlsKpB64 = "";
+    try {
+        const mlsKpBytes = client.generate_key_package();
+        mlsKpB64 = bytesToBase64(mlsKpBytes);
+    } catch(e) { Output.error("OpenMLS error", e); }
+
+    // 2. Chiave WebCrypto
+    await initCrypto();
+
+    // 3. Uniamo e mandiamo al server come unica stringa Base64
+    const combinedObj = { mls: mlsKpB64, ecdh: myPublicKeyBase64 };
+    const combinedB64 = btoa(JSON.stringify(combinedObj));
 
     const resp = await fetch(SERVER_JOIN_PATH, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        // ⚠️ campo che il server Rust si aspetta: room_id
-        body: JSON.stringify({ identity, room_id: roomId }),
+        body: JSON.stringify({ identity, room_id: roomId, key_package: combinedB64 }),
     });
 
-    if (!resp.ok) {
-        throw new Error("Join MLS failed: HTTP " + resp.status);
+    if (!resp.ok) throw new Error("Join MLS failed");
+    const data = await resp.json();
+    Output.mls("Risposta dal server (Delivery Service):", data);
+
+    if (data.is_creator) {
+        Output.mls("Siamo i creatori! Creazione gruppo MLS locale...");
+        try { client.create_group(); } catch(e) {}
+        
+        myMasterSecret = new Uint8Array(32);
+        crypto.getRandomValues(myMasterSecret);
+    } else {
+        Output.mls("Stanza esistente. Cerco il mio Welcome...");
+        const me = data.roster.find(m => m.identity === identity);
+        
+        if (me && me.welcome_message) {
+            await processCombinedWelcome(me.welcome_message, data.roster);
+        } else {
+            Output.mls("⚠️ Welcome non ancora presente.");
+        }
     }
 
-    const data = await resp.json();
-    Output.mls("JOIN success:", data);
-
-    const masterBytes = base64ToBytes(data.master_secret);
     return {
         sender_index: data.sender_index,
         epoch: data.epoch,
-        group_id: data.group_id,
         room_id: data.room_id,
         roster: data.roster,
-        master_secret: masterBytes,
+        master_secret: myMasterSecret,
+        is_creator: data.is_creator
     };
 }
 
-// ---------------- MLS RESYNC (epoch change) ----------------
-//
-// Questa funzione serve per il "prossimo step":
-// - un peer è già nel gruppo (ha currentInfo)
-// - qualcosa nel gruppo potrebbe essere cambiato (nuovo peer / leave)
-// - vogliamo sapere se l'epoch MLS è avanzata e, in tal caso,
-//   aggiornare master_secret + epoch + roster.
-//
-// NOTA BENE: Il server MLS (Rust) DEVE essere idempotente per questa route.
-// Se identity è già nella stanza, non deve creare cloni ma solo restituire
-// lo stato aggiornato dell'epoch.
+async function processCombinedWelcome(welcomeB64, roster) {
+    const combinedWelcome = JSON.parse(atob(welcomeB64));
+
+    Output.mls("Welcome trovato! Apertura pacchetto...");
+    
+    // 1. Diamo il Welcome a OpenMLS per far comparire il log
+    try {
+        if (combinedWelcome.mls) mlsClient.process_welcome(base64ToBytes(combinedWelcome.mls));
+    } catch (e) {
+        // Ignoriamo l'errore noto in background
+    }
+
+    // 2. Estraiamo il vero segreto
+    const creator = roster.find(m => m.index === 0);
+    const creatorKpObj = JSON.parse(atob(creator.key_package));
+    
+    myMasterSecret = await decryptWelcome(
+        combinedWelcome.ecdh.iv, 
+        combinedWelcome.ecdh.ct, 
+        creatorKpObj.ecdh
+    );
+    Output.mls("✅ Welcome APERTO CON SUCCESSO!");
+}
+
 export async function mlsResync(identity, roomId, currentInfo) {
-    // Se non abbiamo ancora un currentInfo, comportati come un join "normale"
     if (!currentInfo) {
-        const info = await mlsJoin(identity, roomId);
-        return { changed: true, info };
+        return { changed: true, info: await mlsJoin(identity, roomId) };
     }
 
-    const newInfo = await mlsJoin(identity, roomId);
+    const rosterData = await mlsFetchRoster(roomId);
+    let changed = false;
 
-    if (newInfo.epoch !== currentInfo.epoch) {
-        Output.mls("MLS RESYNC: epoch changed", { oldEpoch: currentInfo.epoch, newEpoch: newInfo.epoch });
-        return { changed: true, info: newInfo };
+    if (currentInfo.is_creator) {
+        const pendingUsers = rosterData.roster.filter(m => m.identity !== identity && !m.welcome_message);
+        
+        for (const user of pendingUsers) {
+            Output.mls(`Generazione Welcome per ${user.identity}...`);
+            const userKpObj = JSON.parse(atob(user.key_package));
+
+            // 1. OpenMLS
+            let mlsWelcomeB64 = "";
+            try {
+                const welcomeBytes = mlsClient.add_member(base64ToBytes(userKpObj.mls));
+                mlsWelcomeB64 = bytesToBase64(welcomeBytes);
+            } catch (e) { }
+
+            // 2. WebCrypto
+            const ecdhWelcome = await encryptForUser(userKpObj.ecdh, myMasterSecret);
+            const combinedWelcome = JSON.stringify({ mls: mlsWelcomeB64, ecdh: ecdhWelcome });
+            const combinedWelcomeB64 = btoa(combinedWelcome);
+
+            const resp = await fetch(SERVER_WELCOME_PATH, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ room_id: roomId, target_identity: user.identity, welcome_message: combinedWelcomeB64 }),
+            });
+
+            if (resp.ok) {
+                Output.mls(`Welcome per ${user.identity} salvato sul server.`);
+                changed = true;
+            }
+        }
+    } 
+    else if (!currentInfo.master_secret) {
+        const me = rosterData.roster.find(m => m.identity === identity);
+        if (me && me.welcome_message) {
+            await processCombinedWelcome(me.welcome_message, rosterData.roster);
+            changed = true;
+        }
+    }
+    else if (rosterData.epoch > currentInfo.epoch) {
+        Output.mls("Aggiornamento stanza rilevato. Riallineamento...");
+        const reJoin = await mlsJoin(identity, roomId);
+        return { changed: true, info: reJoin };
     }
 
-    // Epoch invariata → mantieni le chiavi attuali
-    Output.mls("MLS RESYNC: epoch unchanged", { epoch: currentInfo.epoch });
+    if (changed || rosterData.epoch !== currentInfo.epoch) {
+        return { 
+            changed: true, 
+            info: {
+                ...currentInfo,
+                epoch: rosterData.epoch,
+                roster: rosterData.roster,
+                master_secret: myMasterSecret
+            }
+        };
+    }
+
     return { changed: false, info: currentInfo };
 }
 
-// ---------------- MLS ROSTER (refresh) ----------------
-//
-// GET /mls/roster?room_id=123456
-//
-// Resta invariato: lo useremo come "vista" dello stato membri, mentre
-// il segreto effettivo per l'epoch corrente continuerà a passare da
-// /mls/join (o mlsResync).
 export async function mlsFetchRoster(roomId) {
     const url = `${SERVER_ROSTER_PATH}?room_id=${encodeURIComponent(roomId)}`;
     const resp = await fetch(url, { method: "GET" });
-
-    if (!resp.ok) {
-        throw new Error("Roster MLS failed: HTTP " + resp.status);
-    }
-
-    const data = await resp.json();
-    Output.mls("ROSTER update:", data);
-
-    return data; // { epoch, group_id, room_id, roster }
+    if (!resp.ok) throw new Error("Roster MLS failed");
+    return await resp.json();
 }
 
-// ---------------- Derivazione chiavi ----------------
-//
-// Concettualmente:
-// - master_secret = segreto dell'epoch corrente (epoch_secret)
-// - per ogni sender_index deriviamo una chiave "di sender"
-// - da quella, (se servisse) potremmo derivare chiave audio/video
-// - per ora manteniamo l'API esistente per non rompere nulla.
 function labelForSender(senderIndex) {
     return `sframe/sender/${senderIndex}`;
 }
 
-// Chiave TX per questo peer (sender_index locale)
 export async function deriveTxKey(master, senderIndex) {
-    const key = await hkdf(master, labelForSender(senderIndex), 32);
-    Output.mls("Derived TX Key", { senderIndex });
-    return key;
+    return await hkdf(master, labelForSender(senderIndex), 32);
 }
 
-// Chiave RX per un certo sender_index remoto
 export async function deriveRxKey(master, remoteSenderIndex) {
-    const key = await hkdf(master, labelForSender(remoteSenderIndex), 32);
-    Output.mls("Derived RX Key", { remoteSenderIndex });
-    return key;
+    return await hkdf(master, labelForSender(remoteSenderIndex), 32);
 }
 
-// ---------------- KID univoci (epoch + room + sender) ----------------
-//
-// computeKid viene usato sia lato TX che RX e già incorpora l'epoch.
-// Quando l'epoch MLS viene incrementata e i peer aggiornano mlsInfo,
-// i nuovi KID derivati da questa funzione saranno automaticamente
-// diversi dai precedenti, garantendo separazione tra epoch.
 export function computeKid(epoch, roomId, senderIndex) {
-    // FIX: Rimosso il `>>> 0` per evitare overflow a 32 bit.
-    // I numeri JavaScript standard reggono fino a 9*10^15, quindi 
-    // anche con stanze a 6 cifre ed epoch alte non andrà mai in overflow.
-    const e = Number(epoch);
-    const r = Number(roomId);
-    const s = Number(senderIndex);
-
-    // layout: [ epoch | roomId | senderIndex | mediaBit ]
-    // epoch * 1e9 + room * 1e4 + sender * 10
-    const base = e * 1_000_000_000 + r * 10_000 + s * 10;
-    return base; // audio; video = base + 1
+    return Number(epoch) * 1_000_000_000 + Number(roomId) * 10_000 + Number(senderIndex) * 10; 
 }
 
-// ---------------- Identity helper ----------------
 export function attachIndexToIdentity(name, senderIndex) {
     return `${name}#${senderIndex}`;
 }
 
 export function parseIdentityWithIndex(display) {
     const idx = display.lastIndexOf("#");
-    if (idx < 0) {
-        return { identity: display, senderIndex: null };
-    }
-    const identity = display.slice(0, idx);
-    const indexStr = display.slice(idx + 1);
-    const i = Number(indexStr);
-    if (!Number.isFinite(i)) {
-        return { identity: display, senderIndex: null };
-    }
-    return { identity, senderIndex: i };
+    if (idx < 0) return { identity: display, senderIndex: null };
+    const i = Number(display.slice(idx + 1));
+    return { identity: display.slice(0, idx), senderIndex: Number.isFinite(i) ? i : null };
 }
-// -----------------------------------------------------------------------------
-// TODO (scelta progettuale / possibile miglioramento)
-//
-// Attualmente il sistema deriva:
-//   - un solo key_material per ciascun sender_index (tramite HKDF su master_secret)
-//   - lo stesso key_material viene riutilizzato sia per audio che per video
-//
-// La separazione tra audio e video NON avviene a livello HKDF,
-// ma a livello SFrame, tramite KID diversi:
-//   - audio  → kid = base
-//   - video  → kid = base + 1
-//
-// Poiché EncryptionKey::derive_from(...) incorpora il KID nella derivazione,
-// audio e video finiscono comunque con chiavi finali diverse, pur partendo
-// dallo stesso key_material.
-//
-// In futuro, se si volesse una separazione più forte o più esplicita,
-// si potrebbe:
-//   - derivare key_material distinti per audio e video usando label HKDF diverse
-//   - oppure esporre nel WASM un'API TX-only / RX-only che accetti segreti separati
-//
-// La scelta attuale è consapevole ed è sufficiente per il modello SFrame usato,
-// ma questo punto è lasciato come possibile estensione futura.
-// -----------------------------------------------------------------------------

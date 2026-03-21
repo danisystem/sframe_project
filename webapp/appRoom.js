@@ -1,6 +1,6 @@
 // appRoom.js
 // ─────────────────────────────────────────────────────────────
-// Janus VideoRoom + SFrame + MLS – multi-room con invite link
+// Janus VideoRoom + SFrame + MLS E2EE – multi-room con invite link
 // ─────────────────────────────────────────────────────────────
 
 // Moduli UI / log
@@ -11,7 +11,7 @@ import { Output } from "./output.js";
 import {
   mlsJoin,
   mlsFetchRoster,
-  mlsResync, // ← resync epoch / master_secret
+  mlsResync, // ← resync epoch / welcome
   deriveTxKey,
   deriveRxKey,
   computeKid,
@@ -26,7 +26,7 @@ import {
   createRxPeer,
 } from "./sframe_layer.js";
 
-// 🔹 FUNZIONI WASM PER GLI HEADER SFRAME (già presenti in lib.rs)
+// 🔹 FUNZIONI WASM PER GLI HEADER SFRAME
 import {
   sframe_last_tx_header,
   sframe_last_rx_header,
@@ -41,10 +41,11 @@ let sessionId = null;
 let pluginHandlePub = null;
 let pcPub = null;
 let keepaliveTimer = null;
+let mlsHeartbeatTimer = null; // 🔴 NUOVO: Timer per controllare i Welcome/Epoch
 let localStream = null;
 
 // Info MLS per questo peer:
-// { sender_index, epoch, group_id, room_id, master_secret, roster }
+// { sender_index, epoch, room_id, master_secret, roster, is_creator }
 let mlsInfo = null;
 
 // Identity “base” (senza #index MLS)
@@ -208,6 +209,37 @@ function stopKeepalive() {
   keepaliveTimer = null;
 }
 
+// 🔴 NUOVO: Heartbeat E2EE per gestire inviti e cambi Epoch
+function startMlsHeartbeat() {
+    if (mlsHeartbeatTimer) return;
+    mlsHeartbeatTimer = setInterval(() => {
+        if (!mlsInfo || !myIdentity) return;
+        const room = Number(els.roomId.value);
+        if (!Number.isFinite(room) || room <= 0) return;
+
+        // Eseguiamo un resync silenzioso in background
+        mlsResync(myIdentity, room, mlsInfo).then(({ changed, info }) => {
+            if (changed) {
+                Output.mls("Heartbeat ha rilevato un aggiornamento della stanza!", { oldEpoch: mlsInfo.epoch, newEpoch: info.epoch });
+                mlsInfo = info;
+                refreshRosterUI();
+                
+                // Se l'epoch è cambiata e abbiamo un master_secret valido, rigeneriamo le chiavi
+                if (mlsInfo.master_secret) {
+                    rekeyAllPeers();
+                }
+            }
+        }).catch(e => {
+            // Non spammare log d'errore per il background polling
+        });
+    }, 5000); // Ogni 5 secondi
+}
+
+function stopMlsHeartbeat() {
+    if (mlsHeartbeatTimer) clearInterval(mlsHeartbeatTimer);
+    mlsHeartbeatTimer = null;
+}
+
 // UI: lista “Remote peers”
 function renderRemotePeers(roster, identityMe) {
   const box = document.getElementById("remotePeers");
@@ -244,7 +276,7 @@ async function refreshRosterUI() {
 // MLS resync + rekey
 // ─────────────────────────────────────────────────────────────
 
-// Resync MLS: controlla se l'epoch è cambiata e, se sì, rekey SFrame
+// Resync MLS manuale: controlla se l'epoch è cambiata e, se sì, rekey SFrame
 async function maybeResyncMls(reason) {
   if (!mlsInfo || !myIdentity) return;
 
@@ -254,11 +286,20 @@ async function maybeResyncMls(reason) {
   setKeySyncInProgress(true, reason);
 
   try {
+    // ⏱️ START: Inizio calcolo MLS per aggiornamento Epoca
+    const t0 = performance.now();
+    
     const { changed, info } = await mlsResync(myIdentity, room, mlsInfo);
+    
+    // ⏱️ STOP: Fine calcolo MLS
+    const t1 = performance.now();
+
     if (!changed) {
-      Output.mls("MLS epoch unchanged", { reason, epoch: mlsInfo.epoch });
-      return;
+      return; // Non c'è nulla di nuovo
     }
+
+    const timeMs = (t1 - t0).toFixed(2);
+    console.log(`📊 [BENCHMARK VERO MLS] Aggiornamento Epoca (${reason}): ${timeMs} ms`);
 
     Output.mls("MLS epoch CHANGED", {
       reason,
@@ -267,7 +308,10 @@ async function maybeResyncMls(reason) {
     });
 
     mlsInfo = info;
-    await rekeyAllPeers();
+    
+    if (mlsInfo.master_secret) {
+        await rekeyAllPeers();
+    }
   } catch (e) {
     Output.error("MLS resync failed", { reason, error: e });
   } finally {
@@ -277,7 +321,7 @@ async function maybeResyncMls(reason) {
 
 // Rigenera chiavi/KID e aggiorna i peer SFrame TX/RX
 async function rekeyAllPeers() {
-  if (!mlsInfo) return;
+  if (!mlsInfo || !mlsInfo.master_secret) return;
 
   const room = Number(els.roomId.value);
   if (!Number.isFinite(room) || room <= 0) return;
@@ -291,10 +335,6 @@ async function rekeyAllPeers() {
       const kidVideo = kidAudio + 1;
 
       txPeerRef.peer = createTxPeer(kidAudio, kidVideo, txKey);
-
-      Output.sframe("TX peer rekeyed", {
-        epoch: mlsInfo.epoch, selfIndex, kidAudio, kidVideo,
-      });
     } catch (e) {
       Output.error("TX rekey failed", e);
     }
@@ -307,33 +347,48 @@ async function rekeyAllPeers() {
       if (remoteIndex == null) continue;
 
       const rxKey = await deriveRxKey(mlsInfo.master_secret, remoteIndex);
+      
+      // 🔴=============================================================
+      // 🔴 PROVA DEL NOVE: IL SABOTAGGIO DELLA CHIAVE
+      // 🔴 Cambia "false" in "true" per rompere apposta la cifratura!
+      // 🔴=============================================================
+      const SABOTA_CHIAVE = false; 
+
+      let chiaveFinale = rxKey;
+      if (SABOTA_CHIAVE) {
+          console.error("☠️ ATTENZIONE: MODALITÀ SABOTAGGIO ATTIVA! La chiave è stata corrotta apposta.");
+          chiaveFinale = new Uint8Array(rxKey);
+          chiaveFinale[0] = chiaveFinale[0] ^ 0xFF; // Inverto i bit del primo byte!
+      }
+
       const kidAudio = computeKid(mlsInfo.epoch, room, remoteIndex);
       const kidVideo = kidAudio + 1;
 
       sub.rxPeerRef = sub.rxPeerRef || {};
-      sub.rxPeerRef.peer = createRxPeer(99, 98, kidAudio, kidVideo, rxKey);
+      sub.rxPeerRef.peer = createRxPeer(99, 98, kidAudio, kidVideo, chiaveFinale);
 
-      Output.sframe("RX peer rekeyed", {
-        feedId, remoteIndex, epoch: mlsInfo.epoch, kidAudio, kidVideo,
-      });
+      // Fix per lo sblocco del video (richieste Keyframe multiple)
+      const askForKeyframeRekey = () => {
+        if (sub.handleId && sessionId) {
+          sendJanus({
+            janus: "message",
+            transaction: makeTxId(`force-kf-rekey-${feedId}`),
+            session_id: sessionId,
+            handle_id: sub.handleId,
+            body: { request: "configure", keyframe: true }
+          });
+        }
+      };
 
-      // 🔴 FIX: Richiedi un Keyframe a Janus per sbloccare subito il video!
-      if (sub.handleId && sessionId) {
-        sendJanus({
-          janus: "message",
-          transaction: makeTxId(`force-kf-${feedId}`),
-          session_id: sessionId,
-          handle_id: sub.handleId,
-          body: { request: "configure", keyframe: true }
-        });
-      }
+      setTimeout(askForKeyframeRekey, 200);
+      setTimeout(askForKeyframeRekey, 1000);
+      setTimeout(askForKeyframeRekey, 2500);
 
     } catch (e) {
       Output.error("RX rekey failed", { feedId, error: e });
     }
   }
 }
-
 // ─────────────────────────────────────────────────────────────
 // UI: Room + invite link
 // ─────────────────────────────────────────────────────────────
@@ -373,7 +428,6 @@ async function setupRoomOnLoad() {
   const url = new URL(window.location.href);
   let roomFromUrl = url.searchParams.get("room");
 
-  // 1) C'è già ?room=... → uso quello
   if (roomFromUrl) {
     const room = Number(roomFromUrl);
     if (!Number.isFinite(room) || room <= 0) {
@@ -385,7 +439,6 @@ async function setupRoomOnLoad() {
     return;
   }
 
-  // 2) Nessuna room nell'URL → chiedo al backend di crearne una
   Output.ui("No room in URL -> creating new room...", {});
   try {
     const res = await fetch("/api/new-room", { method: "POST" });
@@ -397,7 +450,6 @@ async function setupRoomOnLoad() {
 
     const room = Number(json.roomId);
 
-    // Aggiorno URL nel browser con ?room=...
     url.searchParams.set("room", String(room));
     window.history.replaceState(null, "", url.toString());
 
@@ -526,6 +578,8 @@ function handleEvent(msg) {
         data.publishers.forEach(p => subscribeToPublisher(p.id, p.display));
       }
       refreshRosterUI().catch(() => {});
+      
+      // Inizia a trasmettere solo quando il join di Janus è completo
       startPublishing().catch(e => {
         Output.error("startPublishing error (joined)", e);
       });
@@ -535,7 +589,6 @@ function handleEvent(msg) {
 
     if (vr === "event") {
       if (Array.isArray(data.publishers)) {
-        // 🔴 FIX: Prima sincronizziamo MLS, poi ci iscriviamo al video!
         maybeResyncMls("new-publishers").finally(() => {
           data.publishers.forEach(p => {
             subscribeToPublisher(p.id, p.display);
@@ -583,6 +636,41 @@ function handleEvent(msg) {
 }
 
 // ─────────────────────────────────────────────────────────────
+// NUOVO: La Sala d'Attesa E2EE
+// ─────────────────────────────────────────────────────────────
+async function waitForWelcome(room) {
+    setKeySyncInProgress(true, "Waiting for Welcome");
+    return new Promise((resolve) => {
+        const interval = setInterval(async () => {
+            Output.ui("Polling per il Welcome message...");
+            try {
+                // ⏱️ START: Inizio VERO calcolo asimmetrico (WASM MLS + ECDH)
+                const tMlsStart = performance.now();
+                
+                const resyncData = await mlsResync(myIdentity, room, mlsInfo);
+                
+                // ⏱️ STOP: Fine calcolo
+                const tMlsEnd = performance.now();
+
+                if (resyncData.changed && resyncData.info.master_secret) {
+                    clearInterval(interval);
+                    mlsInfo = resyncData.info;
+                    
+                    const timeMs = (tMlsEnd - tMlsStart).toFixed(2);
+                    console.log(`📊 [BENCHMARK VERO MLS] Decifratura Welcome (ECDH + OpenMLS): ${timeMs} ms`);
+                    
+                    setKeySyncInProgress(false);
+                    Output.ui(`✅ Welcome ricevuto e decifrato in ${timeMs} ms! Entro nella stanza.`);
+                    resolve();
+                }
+            } catch (e) {
+                Output.error("Errore durante l'attesa del Welcome", e);
+            }
+        }, 3000); 
+    });
+}
+
+// ─────────────────────────────────────────────────────────────
 // Publisher
 // ─────────────────────────────────────────────────────────────
 
@@ -607,14 +695,23 @@ async function joinAsPublisher() {
   myIdentity = els.displayName.value.trim() || ("user-" + crypto.randomUUID());
 
   try {
-    // 🔴 FIX: Carica WASM subito all'inizio della connessione!
+    // Carica WASM
     await initSFrame(); 
 
     if (!mlsInfo) {
       mlsInfo = await mlsJoin(myIdentity, room);
-      Output.mls("MLS JOIN OK", mlsInfo);
+      Output.mls("MLS JOIN OK", Object.assign({}, mlsInfo, { master_secret: mlsInfo.master_secret ? "HIDDEN" : null }));
       renderRemotePeers(mlsInfo.roster, myIdentity);
     }
+
+    // 🔴 LA SALA D'ATTESA! Se non abbiamo il segreto, blocchiamo tutto finché non arriva!
+    if (!mlsInfo.master_secret) {
+        Output.ui("In attesa dell'invito crittografato dal creatore della stanza...");
+        await waitForWelcome(room);
+    }
+
+    // Avvia l'heartbeat per gestire futuri utenti o aggiornamenti
+    startMlsHeartbeat();
 
     const fullIdentity = attachIndexToIdentity(myIdentity, mlsInfo.sender_index);
 
@@ -638,21 +735,7 @@ async function startPublishing() {
   try {
     const room = Number(els.roomId.value);
 
-    if (!Number.isFinite(room) || room <= 0) {
-      Output.error("No valid roomId for publishing");
-      return;
-    }
-
-    if (!mlsInfo) {
-      myIdentity =
-        els.displayName.value.trim() || ("user-" + crypto.randomUUID());
-      mlsInfo = await mlsJoin(myIdentity, room);
-      Output.mls("MLS JOIN (late) OK", mlsInfo);
-      renderRemotePeers(mlsInfo.roster, myIdentity);
-    }
-
-    await initSFrame();
-
+    // Se arriviamo qui, SIAMO SICURI di avere il master_secret
     const selfIndex = mlsInfo.sender_index;
     const txKey = await deriveTxKey(mlsInfo.master_secret, selfIndex);
 
@@ -683,12 +766,13 @@ async function startPublishing() {
       });
     };
 
+    // 🔴 AGGIORNATO: Qualità Video HD (720p a 30fps) per stressare SFrame
     localStream = await navigator.mediaDevices.getUserMedia({
       audio: { echoCancellation: true },
       video: {
-        width: { ideal: 640 },
-        height: { ideal: 360 },
-        frameRate: { ideal: 20, max: 25 },
+        width: { ideal: 1280 },
+        height: { ideal: 720 },
+        frameRate: { ideal: 30, max: 30 },
       },
     });
 
@@ -718,7 +802,7 @@ async function startPublishing() {
         request: "publish",
         audio: true,
         video: true,
-        bitrate: 800000,
+        bitrate: 2000000, // 🔴 AGGIORNATO: Aumentato a 2 Mbps per supportare l'HD
       },
       jsep: offer,
     });
@@ -737,6 +821,12 @@ function attachSenderTransform(sender, kind, txPeerRefLocal) {
   if (!sender.createEncodedStreams) return;
 
   const { readable, writable } = sender.createEncodedStreams();
+  
+  // 🔴 INIZIO BENCHMARK: Variabili per calcolare la media
+  let frameCount = 0;
+  let totalCryptoTime = 0;
+  let totalPipelineTime = 0;
+  let totalBytes = 0; // 🔴 AGGIORNATO: Contatore Byte
 
   const transform = new TransformStream({
     async transform(chunk, controller) {
@@ -746,35 +836,54 @@ function attachSenderTransform(sender, kind, txPeerRefLocal) {
           return;
         }
 
+        const tPipelineStart = performance.now();
+
         const u8 = new Uint8Array(chunk.data);
+        const frameSize = u8.length; // 🔴 Salviamo la dimensione
+        
+        const t0 = performance.now();
+
         const out =
           kind === "audio"
             ? txPeerRefLocal.peer.encrypt_audio(u8)
             : txPeerRefLocal.peer.encrypt_video(u8);
-        chunk.data = out.buffer;
+            
+        const t1 = performance.now();
 
+        chunk.data = out.buffer;
+        
         if (isSFrameLogEnabled()) {
           try {
             const h = sframe_last_tx_header();
             if (h && h.kid !== undefined) {
-              Output.sframeHeader("TX", kind, {
-                kid: h.kid,
-                kid_len_bytes: 0,
-                ctr: h.ctr,
-                ctr_len_bytes: 0,
-                aad_len: h.header_len,
-                ct_len: h.ct_len,
-                tag_len: h.tag_len,
-                total_len: h.total_len,
-                header_hex: h.header_hex,
-              });
+              Output.sframeHeader("TX", kind, h);
             }
-          } catch (e) {
-            Output.error("SFrame TX header log failed", e);
-          }
+          } catch (e) {}
         }
 
         controller.enqueue(chunk);
+        
+        const tPipelineEnd = performance.now();
+
+        if (kind === "video") {
+            frameCount++;
+            totalCryptoTime += (t1 - t0);
+            totalPipelineTime += (tPipelineEnd - tPipelineStart);
+            totalBytes += frameSize; // Sommiamo i byte
+            
+            // Stampa la media ogni 150 frame (circa ogni 5 secondi)
+            if (frameCount % 150 === 0) {
+                const avgCrypto = (totalCryptoTime / 150).toFixed(3);
+                const avgPipeline = (totalPipelineTime / 150).toFixed(3);
+                const avgKb = (totalBytes / 150 / 1024).toFixed(2); // Media in KB
+                
+                console.log(`📊 [SFrame TX] Matematica: ${avgCrypto}ms | Pipeline: ${avgPipeline}ms | Peso Medio Frame: ${avgKb} KB`);
+                
+                totalCryptoTime = 0;
+                totalPipelineTime = 0;
+                totalBytes = 0;
+            }
+        }
       } catch (e) {
         Output.error("TX encrypt", e);
         controller.enqueue(chunk);
@@ -860,7 +969,6 @@ async function handleSubscriberJsep(feedId, sub, jsep) {
       };
 
       pc.ontrack = ev => {
-        // UI video
         if (!sub.videoEl) {
           const box = document.createElement("div");
           box.className = "remoteBox";
@@ -883,11 +991,10 @@ async function handleSubscriberJsep(feedId, sub, jsep) {
           sub.videoEl.srcObject = ev.streams[0];
         }
 
-        // SFrame RX: attacchiamo le trasformazioni APPENA arriva la traccia
         const receiver = ev.receiver;
         sub.receivers.push(receiver);
 
-        if (receiver._sframeAttached) return; // evita doppi attach
+        if (receiver._sframeAttached) return; 
         receiver._sframeAttached = true;
 
         attachReceiverTransform(receiver, receiver.track.kind, sub);
@@ -899,8 +1006,8 @@ async function handleSubscriberJsep(feedId, sub, jsep) {
     await sub.pc.setRemoteDescription(new RTCSessionDescription(jsep));
 
     // ───── MLS + SFrame RX per questo sender remoto ─────
-    if (!mlsInfo) {
-      Output.error("MLS not initialized for subscriber", {});
+    if (!mlsInfo || !mlsInfo.master_secret) {
+      Output.error("MLS not fully initialized for subscriber", {});
       return;
     }
 
@@ -921,11 +1028,6 @@ async function handleSubscriberJsep(feedId, sub, jsep) {
 
     sub.rxPeerRef = { peer: createRxPeer(99, 98, kidAudio, kidVideo, rxKey) };
 
-    // NB: le trasformazioni RX vengono attaccate in ontrack.
-    // Qui ci assicuriamo solo che, se qualche receiver è già arrivato,
-    // abbia la ref aggiornata a rxPeerRef.
-    // (attachReceiverTransform userà sempre sub.rxPeerRef.peer.)
-
     const answer = await sub.pc.createAnswer();
     await sub.pc.setLocalDescription(answer);
 
@@ -937,6 +1039,25 @@ async function handleSubscriberJsep(feedId, sub, jsep) {
       body: { request: "start", room: room },
       jsep: answer,
     });
+
+    // 🔴 INIZIO FIX PROBLEMA 1: Richiesta Keyframe forzata multipla
+    const askForKeyframe = () => {
+        if (sub.handleId && sessionId) {
+            sendJanus({
+                janus: "message",
+                transaction: makeTxId(`force-kf-initial-${feedId}`),
+                session_id: sessionId,
+                handle_id: sub.handleId,
+                body: { request: "configure", keyframe: true }
+            });
+        }
+    };
+
+    // Scaglioniamo le richieste per coprire l'asincronia del player WebRTC
+    setTimeout(askForKeyframe, 500);
+    setTimeout(askForKeyframe, 1500);
+    setTimeout(askForKeyframe, 3000);
+    // 🔴 FINE FIX
 
   } catch (e) {
     Output.error("handleSubscriberJsep", e);
@@ -951,68 +1072,81 @@ function attachReceiverTransform(receiver, kind, sub) {
   if (!receiver.createEncodedStreams) return;
 
   const { readable, writable } = receiver.createEncodedStreams();
+  
+  let frameCount = 0;
+  let totalCryptoTime = 0;
+  let totalPipelineTime = 0;
+  let totalBytes = 0; // 🔴 AGGIORNATO
 
   const transform = new TransformStream({
     async transform(chunk, controller) {
       try {
-        // Durante il key sync → droppiamo i frame
-        if (keySyncInProgress) {
-          return;
-        }
+        if (keySyncInProgress) return;
+        if (!sub.rxPeerRef || !sub.rxPeerRef.peer) return;
 
-        if (!sub.rxPeerRef || !sub.rxPeerRef.peer) {
-          // chiavi non pronte → non mandiamo frame cifrati al decoder
-          return;
-        }
+        const tPipelineStart = performance.now();
 
         const u8 = new Uint8Array(chunk.data);
+        const frameSize = u8.length;
         let outU8;
 
         try {
+          const t0 = performance.now();
+          
           outU8 =
             kind === "audio"
               ? sub.rxPeerRef.peer.decrypt_audio(u8)
               : sub.rxPeerRef.peer.decrypt_video(u8);
+              
+          const t1 = performance.now();
+          
+          chunk.data = outU8.buffer;
+          
+          if (isSFrameLogEnabled()) {
+            try {
+              const h = sframe_last_rx_header();
+              if (h && h.kid !== undefined) {
+                Output.sframeHeader("RX", kind, h);
+              }
+            } catch (e) {}
+          }
+
+          controller.enqueue(chunk);
+
+          const tPipelineEnd = performance.now();
+
+          if (kind === "video") {
+              frameCount++;
+              totalCryptoTime += (t1 - t0);
+              totalPipelineTime += (tPipelineEnd - tPipelineStart);
+              totalBytes += frameSize;
+              
+              if (frameCount % 150 === 0) {
+                  const avgCrypto = (totalCryptoTime / 150).toFixed(3);
+                  const avgPipeline = (totalPipelineTime / 150).toFixed(3);
+                  const avgKb = (totalBytes / 150 / 1024).toFixed(2);
+                  
+                  console.log(`📊 [SFrame RX] Matematica: ${avgCrypto}ms | Pipeline: ${avgPipeline}ms | Peso Medio Frame: ${avgKb} KB`);
+                  
+                  totalCryptoTime = 0;
+                  totalPipelineTime = 0;
+                  totalBytes = 0;
+              }
+          }
+
         } catch (e) {
+          const errMsg = e.toString();
+          if (errMsg.includes("DecryptionKey") || (e.message && e.message.includes("DecryptionKey"))) {
+              return;
+          }
           const now = Date.now();
           if (now - lastRxDecryptErrorTs > 1000) {
             lastRxDecryptErrorTs = now;
             Output.error("RX decrypt", e);
           }
-          // frame cifrato non utilizzabile → non enqueue
           return;
         }
-
-        chunk.data = outU8.buffer;
-
-        if (isSFrameLogEnabled()) {
-          try {
-            const h = sframe_last_rx_header();
-            if (h && h.kid !== undefined) {
-              Output.sframeHeader("RX", kind, {
-                kid: h.kid,
-                kid_len_bytes: 0,
-                ctr: h.ctr,
-                ctr_len_bytes: 0,
-                aad_len: h.header_len,
-                ct_len: h.ct_len,
-                tag_len: h.tag_len,
-                total_len: h.total_len,
-                header_hex: h.header_hex,
-              });
-            }
-          } catch (e) {
-            Output.error("SFrame RX header log failed", e);
-          }
-        }
-
-        controller.enqueue(chunk);
       } catch (e) {
-        const now = Date.now();
-        if (now - lastRxDecryptErrorTs > 1000) {
-          lastRxDecryptErrorTs = now;
-          Output.error("RX decrypt outer", e);
-        }
         return;
       }
     },
@@ -1095,6 +1229,7 @@ function hangup() {
 
 function cleanup() {
   stopKeepalive();
+  stopMlsHeartbeat(); // 🔴 Fermiamo il polling MLS!
 
   if (pcPub) try { pcPub.close(); } catch {}
   pcPub = null;
@@ -1155,3 +1290,16 @@ els.btnToggleCam.addEventListener("click", toggleCam);
 
 setupRoomOnLoad().catch(e => Output.error("Room setup failed", e));
 Output.ui("App pronta", {});
+// 🔴 MISURAZIONE LATENZA DI RETE (RTT verso Janus)
+setInterval(async () => {
+    if (!pcPub) return;
+    try {
+        const stats = await pcPub.getStats();
+        stats.forEach(report => {
+            if (report.type === 'candidate-pair' && report.state === 'succeeded') {
+                const rttMs = (report.currentRoundTripTime * 1000).toFixed(2);
+                console.log(`🌐 [RETE WebRTC] Latenza verso il server Janus (RTT): ${rttMs} ms`);
+            }
+        });
+    } catch(e) {}
+}, 10000); // Stampa ogni 10 secondi

@@ -62,6 +62,7 @@ app.get("/", (req, res) => {
           <li>Webapp: <code>GET /appRoom.html?room=1234</code> (esempio)</li>
           <li>API nuova stanza: <code>POST /api/new-room</code></li>
           <li>MLS join: <code>POST /mls/join</code> → http://${MLS_HOST}:${MLS_PORT}/mls/join</li>
+          <li>MLS welcome: <code>POST /mls/welcome</code> → http://${MLS_HOST}:${MLS_PORT}/mls/welcome</li>
           <li>MLS roster: <code>GET /mls/roster?room_id=ID</code> → http://${MLS_HOST}:${MLS_PORT}/mls/roster</li>
           <li>Janus WS proxy: <code>wss://sframe.local/janus</code> → ${JANUS_WS_URL}</li>
           <li>Janus HTTP backend: <code>${JANUS_HTTP_URL}</code></li>
@@ -104,6 +105,47 @@ app.post("/mls/join", (req, res) => {
 
   proxyReq.on("error", (err) => {
     console.error("[MLS proxy] join error:", err.message);
+    res.status(502).json({ error: "MLS server unreachable" });
+  });
+
+  proxyReq.write(payload);
+  proxyReq.end();
+});
+
+// ============================================================================
+//  PROXY MLS: POST /mls/welcome (NUOVA ROTTA E2EE)
+// ============================================================================
+
+app.post("/mls/welcome", (req, res) => {
+  const payload = JSON.stringify(req.body);
+
+  const options = {
+    hostname: MLS_HOST,
+    port: MLS_PORT,
+    path: "/mls/welcome",
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Content-Length": Buffer.byteLength(payload),
+    },
+  };
+
+  const proxyReq = http.request(options, (proxyRes) => {
+    let data = "";
+    proxyRes.on("data", (chunk) => (data += chunk));
+    proxyRes.on("end", () => {
+      try {
+        const json = JSON.parse(data);
+        res.status(proxyRes.statusCode || 200).json(json);
+      } catch (e) {
+        console.error("[MLS proxy] welcome parse error:", e.message);
+        res.status(502).json({ error: "Invalid JSON from MLS server" });
+      }
+    });
+  });
+
+  proxyReq.on("error", (err) => {
+    console.error("[MLS proxy] welcome error:", err.message);
     res.status(502).json({ error: "MLS server unreachable" });
   });
 
@@ -393,7 +435,6 @@ wssJanus.on("connection", (clientWs) => {
       }
     } catch (_) {}
 
-    // 🔴 FIX APPLICATO QUI: controlliamo che readyState sia === 1 (OPEN)
     if (janusOpen && janusWs.readyState === 1) {
       janusWs.send(text);
     } else {
