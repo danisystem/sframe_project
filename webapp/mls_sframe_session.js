@@ -170,6 +170,7 @@ export async function mlsResync(identity, roomId, currentInfo) {
     const rosterData = await mlsFetchRoster(roomId);
     let changed = false;
 
+    // Se sono il creatore, genero i Welcome per chi è appena entrato e non ce l'ha
     if (currentInfo.is_creator) {
         const pendingUsers = rosterData.roster.filter(m => m.identity !== identity && !m.welcome_message);
         
@@ -201,6 +202,7 @@ export async function mlsResync(identity, roomId, currentInfo) {
             }
         }
     } 
+    // Se NON sono il creatore e non ho ancora il segreto, lo cerco
     else if (!currentInfo.master_secret) {
         const me = rosterData.roster.find(m => m.identity === identity);
         if (me && me.welcome_message) {
@@ -208,12 +210,14 @@ export async function mlsResync(identity, roomId, currentInfo) {
             changed = true;
         }
     }
+    // 🔴 FIX LOOP: Se l'epoca è cambiata, NON faccio un nuovo mlsJoin!
+    // Aggiorno semplicemente il mio stato interno con il nuovo roster.
     else if (rosterData.epoch > currentInfo.epoch) {
-        Output.mls("Aggiornamento stanza rilevato. Riallineamento...");
-        const reJoin = await mlsJoin(identity, roomId);
-        return { changed: true, info: reJoin };
+        Output.mls("Aggiornamento stanza rilevato passivamente. Riallineamento...");
+        changed = true;
     }
 
+    // Se c'è stato un cambiamento (o di Epoca o di Welcome generati/ricevuti)
     if (changed || rosterData.epoch !== currentInfo.epoch) {
         return { 
             changed: true, 

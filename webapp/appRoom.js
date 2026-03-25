@@ -63,6 +63,9 @@ let lastRxDecryptErrorTs = 0;
 // stato di "key sync in corso"
 let keySyncInProgress = false;
 
+// 🔴 FIX LOOP: Variabile per evitare sovrapposizioni (il "lucchetto")
+let isResyncing = false;
+
 // ─────────────────────────────────────────────────────────────
 // Utility UI: overlay “syncing keys” + toast stile Zoom
 // ─────────────────────────────────────────────────────────────
@@ -217,6 +220,10 @@ function startMlsHeartbeat() {
         const room = Number(els.roomId.value);
         if (!Number.isFinite(room) || room <= 0) return;
 
+        // 🔴 FIX LOOP: Se c'è già un sync in corso, salta il turno
+        if (isResyncing) return;
+        isResyncing = true; // Chiudo il lucchetto
+
         // Eseguiamo un resync silenzioso in background
         mlsResync(myIdentity, room, mlsInfo).then(({ changed, info }) => {
             if (changed) {
@@ -231,6 +238,8 @@ function startMlsHeartbeat() {
             }
         }).catch(e => {
             // Non spammare log d'errore per il background polling
+        }).finally(() => {
+            isResyncing = false; // 🔴 FIX LOOP: Riapro il lucchetto
         });
     }, 5000); // Ogni 5 secondi
 }
@@ -283,9 +292,17 @@ async function maybeResyncMls(reason) {
   const room = Number(els.roomId.value);
   if (!Number.isFinite(room) || room <= 0) return;
 
+  // 🔴 FIX LOOP: Evita richieste multiple simultanee
+  if (isResyncing) return;
+  isResyncing = true;
+
   setKeySyncInProgress(true, reason);
 
   try {
+    // 🔴 FIX LOOP: Ritardo casuale per evitare che tutti colpiscano il server insieme
+    const jitter = Math.floor(Math.random() * 1500) + 500;
+    await new Promise(resolve => setTimeout(resolve, jitter));
+
     // ⏱️ START: Inizio calcolo MLS per aggiornamento Epoca
     const t0 = performance.now();
     
@@ -316,6 +333,7 @@ async function maybeResyncMls(reason) {
     Output.error("MLS resync failed", { reason, error: e });
   } finally {
     setKeySyncInProgress(false, reason);
+    isResyncing = false; // 🔴 FIX LOOP: Riapro il lucchetto
   }
 }
 
@@ -644,6 +662,10 @@ async function waitForWelcome(room) {
         const interval = setInterval(async () => {
             Output.ui("Polling per il Welcome message...");
             try {
+                // 🔴 FIX LOOP: Chiudiamo momentaneamente il lucchetto solo in questa funzione per evitare log
+                if (isResyncing) return;
+                isResyncing = true;
+
                 // ⏱️ START: Inizio VERO calcolo asimmetrico (WASM MLS + ECDH)
                 const tMlsStart = performance.now();
                 
@@ -651,6 +673,8 @@ async function waitForWelcome(room) {
                 
                 // ⏱️ STOP: Fine calcolo
                 const tMlsEnd = performance.now();
+                
+                isResyncing = false; // Riapro il lucchetto
 
                 if (resyncData.changed && resyncData.info.master_secret) {
                     clearInterval(interval);
@@ -664,6 +688,7 @@ async function waitForWelcome(room) {
                     resolve();
                 }
             } catch (e) {
+                isResyncing = false;
                 Output.error("Errore durante l'attesa del Welcome", e);
             }
         }, 3000); 
@@ -770,8 +795,8 @@ async function startPublishing() {
     localStream = await navigator.mediaDevices.getUserMedia({
       audio: { echoCancellation: true },
       video: {
-        width: { ideal: 1280 },
-        height: { ideal: 720 },
+        width: { ideal: 640 },
+        height: { ideal: 480 },
         frameRate: { ideal: 30, max: 30 },
       },
     });
